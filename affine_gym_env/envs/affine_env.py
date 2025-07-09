@@ -6,13 +6,13 @@ from gymnasium import spaces
 from collections import deque # 导入 deque 用于轨迹保存
 
 # 测试时用
-from affine_utils.lidar import Lidar
-from affine_utils.obstacles import Circle, Rectangle
-from affine_utils.arg import MapArg, AgentArg, RewardArg
+# from affine_utils.lidar import Lidar
+# from affine_utils.obstacles import Circle, Rectangle
+# from affine_utils.arg import MapArg, AgentArg, RewardArg
 # 训练时用
-# from .affine_utils.lidar import Lidar
-# from .affine_utils.obstacles import Circle, Rectangle
-# from .affine_utils.arg import MapArg, AgentArg, RewardArg
+from .affine_utils.lidar import Lidar
+from .affine_utils.obstacles import Circle, Rectangle, Line
+from .affine_utils.arg import MapArg, AgentArg, RewardArg
 
 class AffineEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
@@ -41,7 +41,7 @@ class AffineEnv(gym.Env):
         scale_factor_y_needed = self.effective_screen_height / self.world_height
 
         # 实际使用的缩放因子：取两者中较小的一个，以确保所有内容都可见且不拉伸
-        self.scale_factor = min(scale_factor_x_needed, scale_factor_y_needed) 
+        self.scale_factor = min(scale_factor_x_needed, scale_factor_y_needed)
 
         # 计算实际缩放后的世界内容在有效区域中的像素尺寸
         self.scaled_world_width_px = self.world_width * self.scale_factor
@@ -62,6 +62,10 @@ class AffineEnv(gym.Env):
             Rectangle(center=self.rectangle_pos[1], size=self.rectangle_size, angle=0.0),
             Circle(center=self.circle_pos[0], radius=self.circle_radius),
             Circle(center=self.circle_pos[1], radius=self.circle_radius),
+            Line(p1=np.array([self.min_x, self.max_y]), p2=np.array([self.max_x, self.max_y])), # 上边界
+            Line(p1=np.array([self.min_x, self.min_y]), p2=np.array([self.max_x, self.min_y])), # 下边界
+            Line(p1=np.array([self.min_x, self.min_y]), p2=np.array([self.min_x, self.max_y])), # 左边界
+            Line(p1=np.array([self.max_x, self.min_y]), p2=np.array([self.max_x, self.max_y])), # 右边界
         ])
         self.goal_radius = MapArg.GOAL_RADIUS
         self.goal_pos = MapArg.GOAL_POS
@@ -78,16 +82,16 @@ class AffineEnv(gym.Env):
         self.lidar = Lidar(n_rays=self.lidar_num_rays, max_range=self.lidar_max_range, fov=self.lidar_fov)
 
         self.action_space = spaces.Dict({
-            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float32),
-            "rot": spaces.Box(low=AgentArg.MIN_ROT, high=AgentArg.MAX_ROT, shape=(), dtype=np.float32),
-            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE]), dtype=np.float32),
-            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR]), dtype=np.float32),
+            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC])),
+            "rot": spaces.Box(low=AgentArg.MIN_ROT, high=AgentArg.MAX_ROT, shape=()),
+            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE])),
+            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR])),
             },
             seed=seed)
         self.observation_space = spaces.Dict({
-            "leader_x": spaces.Box(low=self.min_x, high=self.max_x, shape=(self.num_leader, ), dtype=np.float32),
-            "leader_y": spaces.Box(low=self.min_y, high=self.max_y, shape=(self.num_leader, ), dtype=np.float32),
-            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays), dtype=np.float32),
+            "leader_x": spaces.Box(low=self.min_x, high=self.max_x, shape=(self.num_leader, )),
+            "leader_y": spaces.Box(low=self.min_y, high=self.max_y, shape=(self.num_leader, )),
+            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays)),
             },
             seed=seed)
 
@@ -134,7 +138,7 @@ class AffineEnv(gym.Env):
         return {
             "leader_x": self.leader_pos[:,0],
             "leader_y": self.leader_pos[:,1],
-            "leader_meas": np.array(meas, dtype=np.float32)
+            "leader_meas": np.array(meas)
         }
 
     def _get_info(self):
@@ -144,9 +148,9 @@ class AffineEnv(gym.Env):
     def reset(self, seed=MapArg.SEED, options=None):
         super().reset(seed=seed)
 
-        self.leader_pos = np.array(self.leader_spawn, dtype=np.float32)
-        self.leader_acc = np.zeros((self.num_leader, 2), dtype=np.float32)
-        self.leader_vel = np.zeros((self.num_leader, 2), dtype=np.float32)
+        self.leader_pos = np.array(self.leader_spawn)
+        self.leader_acc = np.zeros((self.num_leader, 2))
+        self.leader_vel = np.zeros((self.num_leader, 2))
 
         # 重置轨迹缓冲区
         for i in range(self.num_leader):
@@ -164,10 +168,10 @@ class AffineEnv(gym.Env):
         return obs, info
 
     def step(self, action):
-        acc = np.array(action["acc"], dtype=np.float32)
-        rot = float(action["rot"])
-        scale = np.array(action["scale"], dtype=np.float32)
-        shear = np.array(action["shear"], dtype=np.float32)
+        acc = np.array(action["acc"], )
+        rot = np.float64(action["rot"])
+        scale = np.array(action["scale"], )
+        shear = np.array(action["shear"], )
         acc = np.clip(acc, AgentArg.MIN_ACC, AgentArg.MAX_ACC)
         rot = np.clip(rot, AgentArg.MIN_ROT, AgentArg.MAX_ROT)
         scale = np.clip(scale, AgentArg.MIN_SCALE, AgentArg.MAX_SCALE)
@@ -191,7 +195,7 @@ class AffineEnv(gym.Env):
         rew, done = self.reward(obs)
         if self.render_mode == "human":
             self.render()
-
+        info = self._get_info()
         return obs, rew, done, False, info
 
     def reward(self, obs):
@@ -317,7 +321,6 @@ class AffineEnv(gym.Env):
                 pygame.draw.line(canvas, self.COLORS["LIDAR_RAY"], leader_screen, ray_end_screen, 1)
 
             pygame.draw.circle(canvas, self.COLORS["LEADER"] if i!=0 else self.COLORS["FIRST"], leader_screen, agent_radius_screen)
-
 
         if self.render_mode == "human":
             pygame.event.pump()

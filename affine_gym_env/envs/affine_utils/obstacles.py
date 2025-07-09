@@ -13,3 +13,9 @@ class Rectangle:
     center: np.ndarray  # [x, y]
     size: np.ndarray    # [width, height]
     angle: float        # 旋转角度 (弧度)
+
+@dataclass
+class Line:
+    """线段障碍物，由两个端点p1和p2定义"""
+    p1: np.ndarray
+    p2: np.ndarray
