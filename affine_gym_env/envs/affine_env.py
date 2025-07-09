@@ -5,10 +5,14 @@ import gymnasium as gym
 from gymnasium import spaces
 from collections import deque # 导入 deque 用于轨迹保存
 
-# 确保这些导入路径正确
-from .affine_utils.lidar import Lidar
-from .affine_utils.obstacles import Circle, Rectangle
-from .affine_utils.arg import MapArg, AgentArg, RewardArg
+# 测试时用
+from affine_utils.lidar import Lidar
+from affine_utils.obstacles import Circle, Rectangle
+from affine_utils.arg import MapArg, AgentArg, RewardArg
+# 训练时用
+# from .affine_utils.lidar import Lidar
+# from .affine_utils.obstacles import Circle, Rectangle
+# from .affine_utils.arg import MapArg, AgentArg, RewardArg
 
 class AffineEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
@@ -62,11 +66,9 @@ class AffineEnv(gym.Env):
         self.goal_radius = MapArg.GOAL_RADIUS
         self.goal_pos = MapArg.GOAL_POS
 
-        self.num_real_leader = AgentArg.NUM_REAL_LEADER
-        self.virtual_leader_spawn = AgentArg.VIRTUAL_LEADER_SPAWN
-        self.real_leader_spawn = AgentArg.REAL_LEADER_SPAWN
-        self.virtual_leader_pos = self.virtual_leader_spawn
-        self.real_leader_pos = self.real_leader_spawn
+        self.num_leader = AgentArg.NUM_LEADERS
+        self.leader_spawn = AgentArg.LEADER_SPAWN
+        self.leader_pos = self.leader_spawn
         self.agent_radius = AgentArg.AGENT_RADIUS
 
         self.lidar_num_rays = AgentArg.LIDAR_NUM_RAYS
@@ -74,7 +76,6 @@ class AffineEnv(gym.Env):
         self.lidar_fov = AgentArg.LIDAR_FOV
 
         self.lidar = Lidar(n_rays=self.lidar_num_rays, max_range=self.lidar_max_range, fov=self.lidar_fov)
-
 
         self.action_space = spaces.Dict({
             "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float32),
@@ -84,10 +85,9 @@ class AffineEnv(gym.Env):
             },
             seed=seed)
         self.observation_space = spaces.Dict({
-            "virtual_pos": spaces.Box(low=np.array([self.min_x, self.min_y], dtype=np.float32), high=np.array([self.max_x, self.max_y], dtype=np.float32)),
-            "leader_x": spaces.Box(low=self.min_x, high=self.max_x, shape=(self.num_real_leader, ), dtype=np.float32),
-            "leader_y": spaces.Box(low=self.min_y, high=self.max_y, shape=(self.num_real_leader, ), dtype=np.float32),
-            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_real_leader, self.lidar_num_rays), dtype=np.float32),
+            "leader_x": spaces.Box(low=self.min_x, high=self.max_x, shape=(self.num_leader, ), dtype=np.float32),
+            "leader_y": spaces.Box(low=self.min_y, high=self.max_y, shape=(self.num_leader, ), dtype=np.float32),
+            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays), dtype=np.float32),
             },
             seed=seed)
 
@@ -101,31 +101,29 @@ class AffineEnv(gym.Env):
             "BOUNDARY": (0, 0, 0),         # 黑色
             "OBSTACLE": (150, 150, 150),   # 灰色
             "GOAL": (0, 255, 0),           # 绿色
-            "VIRTUAL_LEADER": (255, 0, 0), # 红色
-            "REAL_LEADER": (0, 0, 255),    # 蓝色
-            "LIDAR_RAY": (200, 200, 0),    # 黄色
-            "VIRTUAL_TRAIL": (255, 150, 150), # 浅红，用于虚拟领导者轨迹
-            "REAL_TRAIL": (150, 150, 255),    # 浅蓝，用于实际领导者轨迹
+            "LEADER": (0, 0, 255),    # 蓝色
+            "FIRST": (255, 0, 0),
+            "LIDAR_RAY": (150, 150, 150),    # 灰色
+            "FIRST_TRAIL": (255, 150, 150),
+            "LEADER_TRAIL": (150, 150, 255),    # 浅蓝，用于实际领导者轨迹
         }
 
         # 轨迹缓冲区设置
         self.trail_length = 100 # 轨迹点数
-        self.virtual_leader_trail = deque(maxlen=self.trail_length)
         # 为每个实际领导者创建一个独立的轨迹缓冲区
-        self.real_leader_trails = [deque(maxlen=self.trail_length) for _ in range(self.num_real_leader)]
-
+        self.leader_trails = [deque(maxlen=self.trail_length) for _ in range(self.num_leader)]
 
     def _get_obs(self):
         meas = []
 
         all_fixed_obstacles = list(self.obstacle_array)
 
-        for i, leader_pos in enumerate(self.real_leader_pos):
-            all_real_leaders_circles = [Circle(center=pos, radius=self.agent_radius) for pos in self.real_leader_pos]
+        for i, leader_pos in enumerate(self.leader_pos):
+            all_leaders_circles = [Circle(center=pos, radius=self.agent_radius) for pos in self.leader_pos]
 
             current_leader_obstacles_for_scan = []
             current_leader_obstacles_for_scan.extend(all_fixed_obstacles)
-            for j, other_leader_circle in enumerate(all_real_leaders_circles):
+            for j, other_leader_circle in enumerate(all_leaders_circles):
                 if i != j:
                     current_leader_obstacles_for_scan.append(other_leader_circle)
 
@@ -134,9 +132,8 @@ class AffineEnv(gym.Env):
             meas.append(dist)
 
         return {
-            "virtual_pos": self.virtual_leader_pos,
-            "leader_x": self.real_leader_pos[:,0],
-            "leader_y": self.real_leader_pos[:,1],
+            "leader_x": self.leader_pos[:,0],
+            "leader_y": self.leader_pos[:,1],
             "leader_meas": np.array(meas, dtype=np.float32)
         }
 
@@ -147,21 +144,17 @@ class AffineEnv(gym.Env):
     def reset(self, seed=MapArg.SEED, options=None):
         super().reset(seed=seed)
 
-        self.virtual_leader_pos = np.array(self.virtual_leader_spawn, dtype=np.float32)
-        self.real_leader_pos = np.array(self.real_leader_spawn, dtype=np.float32)
-
-        self.virtual_leader_acc = np.array([0., 0.], dtype=np.float32)
-        self.virtual_leader_vel = np.array([0., 0.], dtype=np.float32)
-        self.real_leader_acc = np.zeros((self.num_real_leader, 2), dtype=np.float32)
-        self.real_leader_vel = np.zeros((self.num_real_leader, 2), dtype=np.float32)
+        self.leader_pos = np.array(self.leader_spawn, dtype=np.float32)
+        self.leader_acc = np.zeros((self.num_leader, 2), dtype=np.float32)
+        self.leader_vel = np.zeros((self.num_leader, 2), dtype=np.float32)
 
         # 重置轨迹缓冲区
-        self.virtual_leader_trail.clear()
-        self.virtual_leader_trail.append(self.virtual_leader_pos.copy()) # 保存初始位置
-        for i in range(self.num_real_leader):
-            self.real_leader_trails[i].clear()
-            self.real_leader_trails[i].append(self.real_leader_pos[i].copy()) # 保存初始位置
+        for i in range(self.num_leader):
+            self.leader_trails[i].clear()
+            self.leader_trails[i].append(self.leader_pos[i].copy()) # 保存初始位置
 
+        # 保存上一时刻位置用来计算奖励
+        self.old_pos = self.leader_pos
         obs = self._get_obs()
         info = self._get_info()
 
@@ -175,83 +168,50 @@ class AffineEnv(gym.Env):
         rot = float(action["rot"])
         scale = np.array(action["scale"], dtype=np.float32)
         shear = np.array(action["shear"], dtype=np.float32)
+        acc = np.clip(acc, AgentArg.MIN_ACC, AgentArg.MAX_ACC)
+        rot = np.clip(rot, AgentArg.MIN_ROT, AgentArg.MAX_ROT)
+        scale = np.clip(scale, AgentArg.MIN_SCALE, AgentArg.MAX_SCALE)
+        shear = np.clip(shear, AgentArg.MIN_SHEAR, AgentArg.MAX_SHEAR)
+        self.old_pos = self.leader_pos
+        # 更新领导者1的状态
+        self.leader_acc[0] = acc
+        self.leader_vel[0] += self.leader_acc[0] * self.dt
+        self.leader_pos[0] += self.leader_vel[0] * self.dt
+        transl = self.leader_pos[0] - self.leader_spawn[0]
+        self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, transl, scale, shear)
+        # 更新领导者2和3的状态
+        self.leader_acc[1:] = AgentArg.KP * (self.leader_pos[1:] - self.target_pos[1:]) + AgentArg.KD * (self.leader_pos[1:] - self.target_pos[1:]) * self.dt
+        self.leader_vel[1:] += self.leader_acc[1:] * self.dt
+        self.leader_pos[1:] += self.leader_vel[1:] * self.dt
+        self.leader_pos = np.clip(self.leader_pos, [self.min_x, self.min_y], [self.max_x, self.max_y])
 
-        # 保存当前位置用于计算奖励（例如移动奖励）
-        old_virtual_leader_pos = self.virtual_leader_pos.copy()
-
-        self.virtual_leader_acc = acc
-
-        # 严格限制加速度在 MAX_ACC 和 MIN_ACC 之间，针对每个分量
-        self.virtual_leader_acc = np.clip(self.virtual_leader_acc, AgentArg.MIN_ACC, AgentArg.MAX_ACC)
-
-
-        transl = self.virtual_leader_vel * self.dt + 0.5 * self.virtual_leader_acc * self.dt**2
-
-        self.virtual_leader_pos += transl
-        self.virtual_leader_vel += self.virtual_leader_acc * self.dt
-
-        # 严格限制虚拟领导者速度在 MAX_VEL 范围内
-        self.virtual_leader_vel = np.clip(self.virtual_leader_vel, -AgentArg.MAX_VEL, AgentArg.MAX_VEL) # 假设MAX_VEL也适用于负方向
-
-        real_leader_target_pos = self.apply_affine_transform(self.real_leader_pos, rot, transl, scale, shear)
-
-        pos_error = real_leader_target_pos - self.real_leader_pos
-        vel_error = self.virtual_leader_vel - self.real_leader_vel
-
-        self.real_leader_acc = AgentArg.KP_POS * pos_error + AgentArg.KP_VEL * vel_error
-
-        # 限制实际领导者加速度在 MAX_ACC 和 MIN_ACC 之间，针对每个分量
-        self.real_leader_acc = np.clip(self.real_leader_acc, AgentArg.MIN_ACC, AgentArg.MAX_ACC)
-
-        self.real_leader_pos += self.real_leader_vel * self.dt + 0.5 * self.real_leader_acc * self.dt**2
-        self.real_leader_vel += self.real_leader_acc * self.dt
-
-        # 限制实际领导者速度在 MAX_VEL 范围内
-        self.real_leader_vel = np.clip(self.real_leader_vel, -AgentArg.MAX_VEL, AgentArg.MAX_VEL)
-
-        # 边界检查 (可选，确保智能体在地图内)
-        self.real_leader_pos[:, 0] = np.clip(self.real_leader_pos[:, 0], self.min_x, self.max_x)
-        self.real_leader_pos[:, 1] = np.clip(self.real_leader_pos[:, 1], self.min_y, self.max_y)
-        self.virtual_leader_pos = np.clip(self.virtual_leader_pos, np.array([self.min_x, self.min_y]), np.array([self.max_x, self.max_y]))
-
-        # 更新轨迹缓冲区
-        self.virtual_leader_trail.append(self.virtual_leader_pos.copy())
-        for i in range(self.num_real_leader):
-            self.real_leader_trails[i].append(self.real_leader_pos[i].copy())
-
+        for i in range(self.num_leader):
+            self.leader_trails[i].append(self.leader_pos[i].copy())
         obs = self._get_obs()
-        rew, done = self.reward(obs, old_virtual_leader_pos) # 传入 old_virtual_leader_pos
-        info = self._get_info()
-
+        rew, done = self.reward(obs)
         if self.render_mode == "human":
             self.render()
 
         return obs, rew, done, False, info
 
-    # reward 函数现在接受 old_virtual_leader_pos
-    def reward(self, obs, old_virtual_leader_pos):
+    def reward(self, obs):
         rew_goal = 0.0
-        done = False
-
-        virtual_pos = obs["virtual_pos"]
-        leader_meas = obs["leader_meas"]
-
-        dist_to_goal = np.linalg.norm(virtual_pos - self.goal_pos)
-        if dist_to_goal <= self.goal_radius:
-            rew_goal = RewardArg.R_GOAL
-            done = True
-
-        # 使用虚拟领导者实际移动的距离来计算移动奖励
-        step_length = np.linalg.norm(virtual_pos - old_virtual_leader_pos)
-        rew_move = RewardArg.R_MOVE * step_length
-
         danger_count = 0
         collision_count = 0
+        done = False
+        leader_meas = obs["leader_meas"]
 
-        for i in range(self.num_real_leader):
+        if np.linalg.norm(self.leader_pos[0] - self.goal_pos) < 0.5*self.agent_radius:
+            rew_goal = 5
+            done = True
+
+        move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - np.linalg.norm(self.leader_pos[0] - self.goal_pos)
+        rew_move = RewardArg.R_MOVE * move_length
+
+        for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            danger_count += np.sum(meas < (self.agent_radius * 2 ))
+            danger_count += np.sum(meas < (self.agent_radius * 2))
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
             collision_count += np.sum(meas <= self.agent_radius)
 
@@ -326,37 +286,20 @@ class AffineEnv(gym.Env):
         pygame.draw.circle(canvas, self.COLORS["GOAL"], goal_center_screen, goal_radius_screen, 2)
 
         # --- 绘制轨迹 ---
-        # 虚拟领导者轨迹
-        if len(self.virtual_leader_trail) > 1:
-            points_screen = [world_to_screen(p) for p in self.virtual_leader_trail]
-            # 渐变效果：从浅到深
-            for i in range(len(points_screen) - 1):
-                # 越旧的轨迹点越透明（这里通过颜色变浅模拟）
-                alpha_factor = (i + 1) / self.trail_length 
-                current_color = tuple([int(c * alpha_factor + (255 * (1 - alpha_factor))) for c in self.COLORS["VIRTUAL_TRAIL"]])
-                # Pygame draw.line 不直接支持 alpha，所以我们用混合颜色近似
-                pygame.draw.line(canvas, current_color, points_screen[i], points_screen[i+1], 1)
-
         # 实际领导者轨迹
-        for i in range(self.num_real_leader):
-            if len(self.real_leader_trails[i]) > 1:
-                points_screen = [world_to_screen(p) for p in self.real_leader_trails[i]]
+        for i in range(self.num_leader):
+            if len(self.leader_trails[i]) > 1:
+                points_screen = [world_to_screen(p) for p in self.leader_trails[i]]
                 for j in range(len(points_screen) - 1):
                     alpha_factor = (j + 1) / self.trail_length
-                    current_color = tuple([int(c * alpha_factor + (255 * (1 - alpha_factor))) for c in self.COLORS["REAL_TRAIL"]])
-                    pygame.draw.line(canvas, current_color, points_screen[j], points_screen[j+1], 1)
-
-        # --- 绘制虚拟领导者 ---
-        virtual_leader_screen = world_to_screen(self.virtual_leader_pos)
-        pygame.draw.circle(canvas, self.COLORS["VIRTUAL_LEADER"], virtual_leader_screen, 5)
+                    current_color = tuple([int(c * alpha_factor + (255 * (1 - alpha_factor))) for c in self.COLORS["LEADER_TRAIL"]]) if i!=0 else tuple([int(c * alpha_factor + (255 * (1 - alpha_factor))) for c in self.COLORS["FIRST_TRAIL"]])
+                    pygame.draw.line(canvas, current_color, points_screen[j], points_screen[j+1], 2)
 
         # --- 绘制实际领导者 ---
         agent_radius_screen = int(self.agent_radius * self.scale_factor)
-        for i in range(self.num_real_leader):
-            real_leader_pos = self.real_leader_pos[i]
-            real_leader_screen = world_to_screen(real_leader_pos)
-            pygame.draw.circle(canvas, self.COLORS["REAL_LEADER"], real_leader_screen, agent_radius_screen)
-
+        for i in range(self.num_leader):
+            leader_pos = self.leader_pos[i]
+            leader_screen = world_to_screen(leader_pos)
             # 绘制 Lidar 射线
             lidar_distances = self._get_obs()["leader_meas"][i]
             # Lidar 射线是从智能体中心发射的，朝向是 agent_angle (这里假设为0)
@@ -369,9 +312,11 @@ class AffineEnv(gym.Env):
             for j in range(self.lidar_num_rays):
                 angle = world_angles[j]
                 distance = lidar_distances[j]
-                ray_end_world = real_leader_pos + np.array([np.cos(angle), np.sin(angle)]) * distance
+                ray_end_world = leader_pos + np.array([np.cos(angle), np.sin(angle)]) * distance
                 ray_end_screen = world_to_screen(ray_end_world)
-                pygame.draw.line(canvas, self.COLORS["LIDAR_RAY"], real_leader_screen, ray_end_screen, 1)
+                pygame.draw.line(canvas, self.COLORS["LIDAR_RAY"], leader_screen, ray_end_screen, 1)
+
+            pygame.draw.circle(canvas, self.COLORS["LEADER"] if i!=0 else self.COLORS["FIRST"], leader_screen, agent_radius_screen)
 
 
         if self.render_mode == "human":
@@ -387,7 +332,6 @@ class AffineEnv(gym.Env):
             pygame.quit()
             self.screen = None
             self.clock = None
-    import numpy as np
 
     def apply_affine_transform(self,
         agents_coords: np.ndarray,
@@ -473,7 +417,6 @@ if __name__ == "__main__":
 
     # 打印初始观测，确认数据结构
     print("Initial Observation Keys:", obs.keys())
-    print("Virtual Leader Pos:", obs["virtual_pos"])
     print("Leader X Pos:", obs["leader_x"])
     print("Leader Y Pos:", obs["leader_y"])
     print("Leader Lidar Meas Shape:", obs["leader_meas"].shape)
@@ -494,8 +437,7 @@ if __name__ == "__main__":
             print(f"\nStep: {step_count}")
             print(f"Reward: {reward:.2f}")
             print(f"Total Reward: {total_reward:.2f}")
-            print(f"Virtual Leader Pos: {obs['virtual_pos']}")
-            # env.real_leader_pos 是最新的位置
+            # env.leader_pos 是最新的位置
             print(f"Leader Lidar Meas Min: {np.min(obs['leader_meas']):.2f}, Max: {np.max(obs['leader_meas']):.2f}")
 
         # 如果达到终止条件
