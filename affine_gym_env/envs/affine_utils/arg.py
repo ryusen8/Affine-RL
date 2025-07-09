@@ -22,7 +22,7 @@ class MapArg:
 class AgentArg:
     NUM_LEADERS = 3
     GOAL_RADIUS = 1.0
-    AGENT_RADIUS = 1.0
+    AGENT_RADIUS = 1.5
 
     NOMINAL_CONFIG = np.array([np.array([0.0, 0.0]),
                                np.array([-1.0, 1.0])*4*AGENT_RADIUS,
@@ -30,8 +30,8 @@ class AgentArg:
     LEADER_SPAWN = NOMINAL_CONFIG + np.array([10.0, 0.0])
 
     LIDAR_NUM_RAYS = 16
-    LIDAR_MAX_RANGE = 5.0
-    LIDAR_FOV = 2*np.pi
+    LIDAR_MAX_RANGE = 10
+    LIDAR_FOV = 0.5*np.pi
 
     MAX_VEL = 5.0
     MIN_VEL = -5.0
@@ -47,11 +47,16 @@ class AgentArg:
     MIN_SHEAR = -1.0
 
     # PID控制真实领导者位移
-    KP = 0.1
+    KP = 0.5
     KD = 0.1
 
 class RewardArg:
-    R_DANGER = -0.1
-    R_COLLISION = -0.5
+    TOL_COLLIDE_TIMES = 5
+
     R_GOAL = 10
-    R_MOVE = 0.05
+    R_MOVE = 1
+
+    P_DANGER = -1
+    P_COLLIDE = -15
+    P_FORM_ERROR = -2
+    P_TIME = -0.05

@@ -1,6 +1,5 @@
 import numpy as np
 import pygame
-import torch
 import gymnasium as gym
 from gymnasium import spaces
 from collections import deque # 导入 deque 用于轨迹保存
@@ -136,9 +135,10 @@ class AffineEnv(gym.Env):
             meas.append(dist)
 
         return {
-            "leader_x": self.leader_pos[:,0],
-            "leader_y": self.leader_pos[:,1],
-            "leader_meas": np.array(meas)
+            "leader_pos": self.leader_pos,
+            "leader_vel": self.leader_vel,
+            "leader_meas": np.array(meas),
+            "formation_error": np.linalg.norm(self.leader_pos[1:] - self.target_pos[1:])
         }
 
     def _get_info(self):
@@ -184,7 +184,7 @@ class AffineEnv(gym.Env):
         transl = self.leader_pos[0] - self.leader_spawn[0]
         self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, transl, scale, shear)
         # 更新领导者2和3的状态
-        self.leader_acc[1:] = AgentArg.KP * (self.leader_pos[1:] - self.target_pos[1:]) + AgentArg.KD * (self.leader_pos[1:] - self.target_pos[1:]) * self.dt
+        self.leader_acc[1:] = AgentArg.KP * (self.target_pos[1:] - self.leader_pos[1:]) + AgentArg.KD * (self.leader_vel[0] - self.leader_vel[1:])
         self.leader_vel[1:] += self.leader_acc[1:] * self.dt
         self.leader_pos[1:] += self.leader_vel[1:] * self.dt
         self.leader_pos = np.clip(self.leader_pos, [self.min_x, self.min_y], [self.max_x, self.max_y])
@@ -199,14 +199,16 @@ class AffineEnv(gym.Env):
         return obs, rew, done, False, info
 
     def reward(self, obs):
+        total_reward = 0
         rew_goal = 0.0
         danger_count = 0
-        collision_count = 0
+        collide_count = 0
         done = False
         leader_meas = obs["leader_meas"]
+        formation_error = obs["formation_error"]
 
         if np.linalg.norm(self.leader_pos[0] - self.goal_pos) < 0.5*self.agent_radius:
-            rew_goal = 5
+            rew_goal = RewardArg.R_GOAL
             done = True
 
         move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - np.linalg.norm(self.leader_pos[0] - self.goal_pos)
@@ -215,14 +217,23 @@ class AffineEnv(gym.Env):
         for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            danger_count += np.sum(meas < (self.agent_radius * 2))
+            danger_count += np.sum(meas < (self.agent_radius * 3))
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
-            collision_count += np.sum(meas <= self.agent_radius)
+            collide_count += np.sum(meas <= self.agent_radius)
 
-        rew_danger = RewardArg.R_DANGER * danger_count
-        rew_collision = RewardArg.R_COLLISION * collision_count
+        if collide_count>=self.num_leader * RewardArg.TOL_COLLIDE_TIMES:
+            done = True
 
-        total_reward = rew_goal + rew_move + rew_danger + rew_collision
+        pen_danger = RewardArg.P_DANGER * danger_count
+        pen_collide = RewardArg.P_COLLIDE * collide_count
+
+        # 队形保持
+        
+        pen_form_error = RewardArg.P_FORM_ERROR * formation_error
+
+        pen_time = RewardArg.P_TIME
+
+        total_reward = rew_goal + rew_move + pen_collide + pen_danger + pen_form_error + pen_time
         return total_reward, done
 
     def _init_render(self):
@@ -306,11 +317,7 @@ class AffineEnv(gym.Env):
             leader_screen = world_to_screen(leader_pos)
             # 绘制 Lidar 射线
             lidar_distances = self._get_obs()["leader_meas"][i]
-            # Lidar 射线是从智能体中心发射的，朝向是 agent_angle (这里假设为0)
-            # 这里的 Lidar.relative_angles 是相对于智能体朝向的角度
-            # 如果智能体有朝向，你需要在 Lidar.scan 时传入真实的 agent_angle，
-            # 并且这里的 world_angles 也要加上该智能体的真实朝向。
-            # 目前你的 _get_obs 仍然使用 agent_angle=0.0，所以这里也保持一致
+            # agent_angle=0.0，所以这里也保持一致
             world_angles = self.lidar.relative_angles + 0.0 # 假设智能体朝向是0
 
             for j in range(self.lidar_num_rays):
