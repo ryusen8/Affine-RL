@@ -12,7 +12,7 @@ class MapArg:
     MIN_Y = -10.0*MAP_SCALE
     MAX_Y = 10.0*MAP_SCALE # [-10, 10]
     GOAL_POS = np.array([85.0, 0.0])*MAP_SCALE
-    GOAL_RADIUS = 1.0*MAP_SCALE
+    GOAL_RADIUS = 2.0*MAP_SCALE
 
     CIRCLE_POS = np.array([[25.0, 0.0],[75.0, 0.0]])*MAP_SCALE
     CIRCLE_RADIUS = 2.5*MAP_SCALE
@@ -30,13 +30,14 @@ class AgentArg:
     LEADER_SPAWN = NOMINAL_CONFIG + np.array([10.0, 0.0])
 
     LIDAR_NUM_RAYS = 16
-    LIDAR_MAX_RANGE = 10
-    LIDAR_FOV = 0.5*np.pi
+    LIDAR_MAX_RANGE = 30
+    LIDAR_FOV = 2*np.pi
 
-    MAX_VEL = 5.0
-    MIN_VEL = -5.0
-    MAX_ACC = 1.0
-    MIN_ACC = -1.0
+    MAX_VEL = 6.0
+    MIN_VEL = -6.0
+    MAX_ACC = 2
+    MIN_ACC = -2
+    TOL_ERROR = 2*AGENT_RADIUS
 
     # 仿射变换参数
     MAX_ROT = np.pi
@@ -47,16 +48,18 @@ class AgentArg:
     MIN_SHEAR = -1.0
 
     # PID控制真实领导者位移
-    KP = 0.5
+    KP = 0.2
     KD = 0.1
 
 class RewardArg:
     TOL_COLLIDE_TIMES = 5
 
-    R_GOAL = 10
-    R_MOVE = 1
+    R_GOAL = 500
+    R_MOVE = 20
+    R_DIR = 5
 
-    P_DANGER = -1
-    P_COLLIDE = -15
-    P_FORM_ERROR = -2
-    P_TIME = -0.05
+    P_FAIL = -100
+    P_DANGER = -0.08
+    P_COLLIDE = -4
+    P_FORM_ERROR = -0.2
+    P_TIME = -0.01

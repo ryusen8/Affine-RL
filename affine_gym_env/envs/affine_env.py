@@ -81,16 +81,23 @@ class AffineEnv(gym.Env):
         self.lidar = Lidar(n_rays=self.lidar_num_rays, max_range=self.lidar_max_range, fov=self.lidar_fov)
 
         self.action_space = spaces.Dict({
-            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC])),
-            "rot": spaces.Box(low=AgentArg.MIN_ROT, high=AgentArg.MAX_ROT, shape=()),
-            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE])),
-            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR])),
+            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float64),
+            "rot": spaces.Box(low=AgentArg.MIN_ROT, high=AgentArg.MAX_ROT, dtype=np.float64),
+            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE]), dtype=np.float64),
+            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR]), dtype=np.float64),
             },
             seed=seed)
+        
         self.observation_space = spaces.Dict({
-            "leader_x": spaces.Box(low=self.min_x, high=self.max_x, shape=(self.num_leader, )),
-            "leader_y": spaces.Box(low=self.min_y, high=self.max_y, shape=(self.num_leader, )),
-            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays)),
+            "leader_pos": spaces.Box(low=np.array([self.min_x,self.min_y]*self.num_leader).reshape(self.num_leader,2),
+                                    high=np.array([self.max_x,self.max_y]*self.num_leader).reshape(self.num_leader,2), dtype=np.float64),
+
+            "leader_vel": spaces.Box(low=np.array([AgentArg.MIN_VEL,AgentArg.MIN_VEL]*self.num_leader).reshape(self.num_leader,2),
+                                    high=np.array([AgentArg.MAX_VEL,AgentArg.MAX_VEL]*self.num_leader).reshape(self.num_leader,2), dtype=np.float64), 
+
+            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays), dtype=np.float64),
+
+            "formation_error": spaces.Box(low=-AgentArg.TOL_ERROR, high=AgentArg.TOL_ERROR, shape=(self.num_leader-1,), dtype=np.float64), 
             },
             seed=seed)
 
@@ -138,7 +145,7 @@ class AffineEnv(gym.Env):
             "leader_pos": self.leader_pos,
             "leader_vel": self.leader_vel,
             "leader_meas": np.array(meas),
-            "formation_error": np.linalg.norm(self.leader_pos[1:] - self.target_pos[1:])
+            "formation_error": np.linalg.norm(self.target_pos[1:] - self.leader_pos[1:], axis=1)
         }
 
     def _get_info(self):
@@ -159,6 +166,9 @@ class AffineEnv(gym.Env):
 
         # 保存上一时刻位置用来计算奖励
         self.old_pos = self.leader_pos
+        self.target_pos = self.leader_pos
+        # self.danger_count = 0
+        self.collide_count = 0
         obs = self._get_obs()
         info = self._get_info()
 
@@ -181,13 +191,15 @@ class AffineEnv(gym.Env):
         self.leader_acc[0] = acc
         self.leader_vel[0] += self.leader_acc[0] * self.dt
         self.leader_pos[0] += self.leader_vel[0] * self.dt
-        transl = self.leader_pos[0] - self.leader_spawn[0]
-        self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, transl, scale, shear)
+        # transl = self.leader_pos[0] - self.leader_spawn[0]
+        transl = np.array([0.0, 0.0])
+        self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, transl, scale, shear) + self.leader_pos[0]
         # 更新领导者2和3的状态
         self.leader_acc[1:] = AgentArg.KP * (self.target_pos[1:] - self.leader_pos[1:]) + AgentArg.KD * (self.leader_vel[0] - self.leader_vel[1:])
         self.leader_vel[1:] += self.leader_acc[1:] * self.dt
         self.leader_pos[1:] += self.leader_vel[1:] * self.dt
         self.leader_pos = np.clip(self.leader_pos, [self.min_x, self.min_y], [self.max_x, self.max_y])
+        self.leader_vel = np.clip(self.leader_vel, AgentArg.MIN_VEL, AgentArg.MAX_VEL)
 
         for i in range(self.num_leader):
             self.leader_trails[i].append(self.leader_pos[i].copy())
@@ -201,37 +213,44 @@ class AffineEnv(gym.Env):
     def reward(self, obs):
         total_reward = 0
         rew_goal = 0.0
-        danger_count = 0
-        collide_count = 0
+        self.danger_count = 0
+        self.collide_rays = 0
         done = False
         leader_meas = obs["leader_meas"]
         formation_error = obs["formation_error"]
 
-        if np.linalg.norm(self.leader_pos[0] - self.goal_pos) < 0.5*self.agent_radius:
+        if np.linalg.norm(self.leader_pos[0] - self.goal_pos) < self.goal_radius:
             rew_goal = RewardArg.R_GOAL
             done = True
 
         move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - np.linalg.norm(self.leader_pos[0] - self.goal_pos)
-        rew_move = RewardArg.R_MOVE * move_length
+        
+        goal_dir = self.goal_pos - self.old_pos[0]
+        move_dir = self.leader_pos[0] - self.old_pos[0]
+        rew_dir = RewardArg.R_DIR * np.dot(goal_dir, move_dir) / (np.linalg.norm(goal_dir) + 1e-6)
+        rew_move = RewardArg.R_MOVE * move_length + rew_dir
+
+        # 队形保持
+        pen_form_error = RewardArg.P_FORM_ERROR * np.sum(formation_error)
+
+        pen_time = RewardArg.P_TIME
 
         for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            danger_count += np.sum(meas < (self.agent_radius * 3))
+            self.danger_count += np.sum(meas < (self.agent_radius * 3))
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
-            collide_count += np.sum(meas <= self.agent_radius)
+            self.collide_rays += np.sum(meas <= self.agent_radius)
 
-        if collide_count>=self.num_leader * RewardArg.TOL_COLLIDE_TIMES:
+        pen_danger = RewardArg.P_DANGER * self.danger_count
+        pen_collide = RewardArg.P_COLLIDE * self.collide_rays
+
+        if self.collide_rays > 2:
+            self.collide_count += 1
+
+        if self.collide_count >= self.num_leader * RewardArg.TOL_COLLIDE_TIMES:
+            pen_collide += RewardArg.P_FAIL
             done = True
-
-        pen_danger = RewardArg.P_DANGER * danger_count
-        pen_collide = RewardArg.P_COLLIDE * collide_count
-
-        # 队形保持
-        
-        pen_form_error = RewardArg.P_FORM_ERROR * formation_error
-
-        pen_time = RewardArg.P_TIME
 
         total_reward = rew_goal + rew_move + pen_collide + pen_danger + pen_form_error + pen_time
         return total_reward, done

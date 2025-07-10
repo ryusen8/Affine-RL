@@ -13,32 +13,21 @@ from tqdm import tqdm
 from my_wrappers import DictActionWrapper, DictObservationWrapper
 import affine_gym_env
 
-import sys
-import os
-
-print("--- sys.path for debugging ---")
-for p in sys.path:
-    print(p)
-print("--- End sys.path for debugging ---")
-
-# 确认当前工作目录
-print(f"Current working directory: {os.getcwd()}")
-
 # --- 0. 参数配置类 ---
 class SACConfig:
     def __init__(self, env_name="Pendulum-v1"):
         self.env_name = env_name
-        self.num_episodes = 20 # 训练的总回合数
+        self.num_episodes = 2000 # 训练的总回合数
         self.max_steps_per_episode = 500 # 每个回合的最大步数
         self.log_interval = 10 # 每隔多少个回合打印一次日志
         self.save_results = True # 是否保存训练结果 (模型和奖励曲线)
 
         # SAC 算法超参数
-        self.actor_lr = 3e-4
-        self.critic_lr = 3e-4
-        self.alpha_lr = 3e-4 # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
+        self.actor_lr = 1e-4
+        self.critic_lr = 1e-4
+        self.alpha_lr = 1e-4 # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
         self.gamma = 0.99 # 折扣因子
-        self.tau = 0.005 # 软更新因子
+        self.tau = 0.01 # 软更新因子
         self.alpha = 0.2 # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
         self.buffer_capacity = 1_000_000 # 经验回放缓冲区容量
         self.batch_size = 256 # 训练批次大小
@@ -52,7 +41,7 @@ class SACConfig:
         self.critic_hidden_size = 256
 
         # 绘图参数
-        self.smoothing_window = 10 # 奖励曲线平滑窗口大小
+        self.smoothing_window = 15 # 奖励曲线平滑窗口大小
 
         # 测试参数
         self.num_test_episodes = 5 # 测试回合数
@@ -226,10 +215,10 @@ def train_sac(config: SACConfig):
     
     # 检查并应用 Dict Wrappers
     if isinstance(env.observation_space, gym.spaces.Dict):
-        print("Applying DictObservationWrapper...")
+        # print("Applying DictObservationWrapper...")
         env = DictObservationWrapper(env)
     if isinstance(env.action_space, gym.spaces.Dict):
-        print("Applying DictActionWrapper...")
+        # print("Applying DictActionWrapper...")
         env = DictActionWrapper(env)
     
     state_dim = env.observation_space.shape[0]
@@ -248,13 +237,14 @@ def train_sac(config: SACConfig):
     total_steps = 0
     
     # 使用 tqdm 包装训练循环
-    with tqdm(total=config.num_episodes, desc=f"Training {config.env_name} (SAC)") as pbar:
+    with tqdm(total=config.num_episodes, desc=f"{config.env_name} w/ SAC") as pbar:
         for episode in range(config.num_episodes):
             state, _ = env.reset()
+            episode_steps = 0
             episode_reward = 0
             for step in range(config.max_steps_per_episode):
                 action = agent.select_action(state)
-                
+
                 next_state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
 
@@ -264,17 +254,18 @@ def train_sac(config: SACConfig):
                 state = next_state
                 episode_reward += reward
                 total_steps += 1
+                episode_steps += 1
 
                 if done:
                     break
-            
+
             episode_rewards.append(episode_reward)
 
             # 更新 tqdm 进度条的后缀信息
             pbar.set_postfix({
-                'reward': f'{episode_reward:.2f}', 
-                'avg_reward': f'{np.mean(episode_rewards[-config.log_interval:]):.2f}' if len(episode_rewards) >= config.log_interval else 'N/A',
-                'steps': total_steps
+                'rew': f'{episode_reward:.2f}', 
+                'avg_rew': f'{np.mean(episode_rewards[-config.log_interval:]):.2f}' if len(episode_rewards) >= config.log_interval else 'N/A',
+                'stp_used': episode_steps
             })
             pbar.update(1) # 更新进度条1步
 
@@ -289,14 +280,14 @@ def train_sac(config: SACConfig):
     if config.save_results:
         # 计算最后log_interval回合的平均奖励作为文件夹名的一部分
         final_avg_reward = np.mean(episode_rewards[-config.log_interval:]) if len(episode_rewards) >= config.log_interval else np.mean(episode_rewards)
-        
+
         # 获取当前时间并格式化
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        
+
         # 创建文件夹名，使其与模型文件命名规则一致
         # 将小数点替换为下划线，以避免文件名中的特殊字符问题
         folder_name = f"{config.env_name}_SAC_{timestamp}_Reward{final_avg_reward:.2f}".replace('.', '_')
-        
+
         # 创建完整路径
         save_dir = os.path.join("train_results", folder_name)
         os.makedirs(save_dir, exist_ok=True)
@@ -336,7 +327,7 @@ def plot_rewards(rewards, env_name, smoothing_window=1, save_path=None):
     plt.title(f"SAC Training Reward Curve for {env_name}")
     plt.legend()
     plt.grid(True)
-    
+
     if save_path:
         plt.savefig(save_path)
         plt.close() # 关闭图形，防止在非交互式环境中显示
@@ -346,13 +337,13 @@ def plot_rewards(rewards, env_name, smoothing_window=1, save_path=None):
 # --- 6. 测试模型并渲染 ---
 def test_model(config: SACConfig, model_path_override=None):
     env = gym.make(config.env_name, render_mode="human")
-    
+
     # 检查并应用 Dict Wrappers (与训练时保持一致)
     if isinstance(env.observation_space, gym.spaces.Dict):
         env = DictObservationWrapper(env)
     if isinstance(env.action_space, gym.spaces.Dict):
         env = DictActionWrapper(env)
-        
+
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     action_space = env.action_space
@@ -380,7 +371,7 @@ def test_model(config: SACConfig, model_path_override=None):
             print("'results' directory not found. Cannot test.")
             env.close()
             return
-            
+
     if not os.path.exists(model_to_load):
         print(f"Error: Model file not found at {model_to_load}. Skipping test.")
         env.close()
@@ -428,7 +419,7 @@ if __name__ == "__main__":
     # 训练 SAC 算法
     # train_sac 现在会返回保存的模型路径
     rewards, saved_model_path = train_sac(config)
-    
+
     # 测试模型并渲染
     # 如果模型成功保存，就用保存的路径进行测试
     if saved_model_path:
