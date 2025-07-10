@@ -15,9 +15,9 @@ class MapArg:
     GOAL_RADIUS = 2.0*MAP_SCALE
 
     CIRCLE_POS = np.array([[25.0, 0.0],[75.0, 0.0]])*MAP_SCALE
-    CIRCLE_RADIUS = 2.5*MAP_SCALE
+    CIRCLE_RADIUS = 2.0*MAP_SCALE
     RECTANGLE_POS = np.array([[50.0, 6.25],[50.0, -6.25]])*MAP_SCALE
-    RECTANGLE_SIZE = np.array([25.0, 7.5])*MAP_SCALE
+    RECTANGLE_SIZE = np.array([25.0, 5.0])*MAP_SCALE
 
 class AgentArg:
     NUM_LEADERS = 3
@@ -52,14 +52,40 @@ class AgentArg:
     KD = 0.1
 
 class RewardArg:
-    TOL_COLLIDE_TIMES = 5
+    TOL_COLLIDE_TIMES = 8
 
     R_GOAL = 500
     R_MOVE = 20
-    R_DIR = 5
+    R_DIR = 2
 
+    P_SLOW = -20
     P_FAIL = -100
-    P_DANGER = -0.08
+    P_DANGER = -0.05
     P_COLLIDE = -4
     P_FORM_ERROR = -0.2
-    P_TIME = -0.01
+    P_TIME = -0.05
+
+class TrainArg:
+    ENV_NAME = "affine_gym_env/AffineEnv"
+    NUM_EP = 20000 # 训练的总回合数
+    EP_MAX_STEP = 500 # 每个回合的最大步数
+    LOG_INTERVAL = 10 # 每隔多少个回合打印一次日志
+    NUM_TEST_EP = 5 # 测试回合数
+    SMOOTH = 15 # 奖励曲线平滑窗口大小
+
+    # SAC 算法超参数
+    ACTOR_LR = 1e-4
+    CRITIC_LR = 1e-4
+    ALPHA_LR = 1e-4 # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
+    GAMMA = 0.99 # 折扣因子
+    TAU = 0.01 # 软更新因子
+    ALPHA_INIT = 0.2 # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
+    BUFFER_SIZE = 1_000_000 # 经验回放缓冲区容量
+    BATCH_SIZE = 256 # 训练批次大小
+
+    # 网络参数
+    ACTOR_HIDDEN_SIZE = 256
+    CRITIC_HIDDEN_SIZE = 256
+
+
+

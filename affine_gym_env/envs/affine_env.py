@@ -186,7 +186,7 @@ class AffineEnv(gym.Env):
         rot = np.clip(rot, AgentArg.MIN_ROT, AgentArg.MAX_ROT)
         scale = np.clip(scale, AgentArg.MIN_SCALE, AgentArg.MAX_SCALE)
         shear = np.clip(shear, AgentArg.MIN_SHEAR, AgentArg.MAX_SHEAR)
-        self.old_pos = self.leader_pos
+        self.old_pos = self.leader_pos.copy()
         # 更新领导者1的状态
         self.leader_acc[0] = acc
         self.leader_vel[0] += self.leader_acc[0] * self.dt
@@ -218,41 +218,50 @@ class AffineEnv(gym.Env):
         done = False
         leader_meas = obs["leader_meas"]
         formation_error = obs["formation_error"]
-
+        
+        #* 完成任务奖励 rew_goal
         if np.linalg.norm(self.leader_pos[0] - self.goal_pos) < self.goal_radius:
             rew_goal = RewardArg.R_GOAL
             done = True
 
+        #* 移动和朝向奖励 rew_move, rew_dir
         move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - np.linalg.norm(self.leader_pos[0] - self.goal_pos)
-        
+        dist_to_goal = np.linalg.norm(self.leader_pos[0] - self.goal_pos)
         goal_dir = self.goal_pos - self.old_pos[0]
         move_dir = self.leader_pos[0] - self.old_pos[0]
-        rew_dir = RewardArg.R_DIR * np.dot(goal_dir, move_dir) / (np.linalg.norm(goal_dir) + 1e-6)
-        rew_move = RewardArg.R_MOVE * move_length + rew_dir
 
-        # 队形保持
+        rew_dir = RewardArg.R_DIR * np.dot(goal_dir, move_dir) / (np.linalg.norm(goal_dir) + 1e-6)
+        rew_move = RewardArg.R_MOVE * (move_length - 0.1*dist_to_goal) + rew_dir
+        
+        #* 滞留惩罚 pen_slow
+        leader_speed = np.linalg.norm(self.leader_vel[0])
+        if np.abs(leader_speed) < 0.1*AgentArg.MAX_VEL and move_length < 0.5*self.agent_radius:
+            pen_slow = RewardArg.P_SLOW
+
+        #* 队形误差惩罚 pen_form_error
         pen_form_error = RewardArg.P_FORM_ERROR * np.sum(formation_error)
 
+        #* 任务时间惩罚 pen_time
         pen_time = RewardArg.P_TIME
 
+        #* 危险惩罚 pen_danger, pen_collide
         for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            self.danger_count += np.sum(meas < (self.agent_radius * 3))
+            self.danger_count += np.sum(meas < (self.agent_radius * 2))
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
             self.collide_rays += np.sum(meas <= self.agent_radius)
-
-        pen_danger = RewardArg.P_DANGER * self.danger_count
-        pen_collide = RewardArg.P_COLLIDE * self.collide_rays
-
         if self.collide_rays > 2:
             self.collide_count += 1
 
+        pen_danger = RewardArg.P_DANGER * self.danger_count
+        pen_collide = RewardArg.P_COLLIDE * self.collide_rays
+        
         if self.collide_count >= self.num_leader * RewardArg.TOL_COLLIDE_TIMES:
             pen_collide += RewardArg.P_FAIL
             done = True
 
-        total_reward = rew_goal + rew_move + pen_collide + pen_danger + pen_form_error + pen_time
+        total_reward = rew_goal + rew_move + pen_collide + pen_danger + pen_form_error + pen_time + pen_slow
         return total_reward, done
 
     def _init_render(self):
