@@ -12,39 +12,40 @@ from datetime import datetime
 from tqdm import tqdm
 from my_wrappers import DictActionWrapper, DictObservationWrapper
 import affine_gym_env
+from affine_gym_env.envs.affine_utils.arg import TrainArg
 
 # --- 0. 参数配置类 ---
 class SACConfig:
     def __init__(self, env_name="Pendulum-v1"):
         self.env_name = env_name
-        self.num_episodes = 2000 # 训练的总回合数
-        self.max_steps_per_episode = 500 # 每个回合的最大步数
-        self.log_interval = 10 # 每隔多少个回合打印一次日志
+        self.num_episodes = TrainArg.NUM_EP # 训练的总回合数
+        self.max_steps_per_episode = TrainArg.EP_MAX_STEP # 每个回合的最大步数
+        self.log_interval = TrainArg.LOG_INTERVAL # 每隔多少个回合打印一次日志
         self.save_results = True # 是否保存训练结果 (模型和奖励曲线)
 
         # SAC 算法超参数
-        self.actor_lr = 1e-4
-        self.critic_lr = 1e-4
-        self.alpha_lr = 1e-4 # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
-        self.gamma = 0.99 # 折扣因子
-        self.tau = 0.01 # 软更新因子
-        self.alpha = 0.2 # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
-        self.buffer_capacity = 1_000_000 # 经验回放缓冲区容量
-        self.batch_size = 256 # 训练批次大小
+        self.actor_lr = TrainArg.ACTOR_LR
+        self.critic_lr = TrainArg.CRITIC_LR
+        self.alpha_lr = TrainArg.ALPHA_LR # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
+        self.gamma = TrainArg.GAMMA # 折扣因子
+        self.tau = TrainArg.TAU # 软更新因子
+        self.alpha = TrainArg.ALPHA_INIT # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
+        self.buffer_capacity = TrainArg.BUFFER_SIZE # 经验回放缓冲区容量
+        self.batch_size = TrainArg.BATCH_SIZE # 训练批次大小
 
         # Actor 网络参数
-        self.actor_hidden_size = 256
+        self.actor_hidden_size = TrainArg.ACTOR_HIDDEN_SIZE
         self.log_std_min = -20
         self.log_std_max = 2
 
         # Critic 网络参数
-        self.critic_hidden_size = 256
+        self.critic_hidden_size = TrainArg.CRITIC_HIDDEN_SIZE
 
         # 绘图参数
-        self.smoothing_window = 15 # 奖励曲线平滑窗口大小
+        self.smoothing_window = TrainArg.SMOOTH # 奖励曲线平滑窗口大小
 
         # 测试参数
-        self.num_test_episodes = 5 # 测试回合数
+        self.num_test_episodes = TrainArg.NUM_TEST_EP # 测试回合数
 
 # --- 1. 定义网络结构 ---
 class Actor(nn.Module):
@@ -167,9 +168,6 @@ class SAC:
             return
 
         state_batch, action_batch, reward_batch, next_state_batch, done_batch = self.replay_buffer.sample(self.batch_size)
-        
-        # 将动作缩放回 [-1, 1] 范围，以匹配 Actor 网络的输出范围
-        action_batch_scaled = (action_batch - self.action_bias) / self.action_scale
 
         # --- Critic Loss ---
         with torch.no_grad():
@@ -245,7 +243,7 @@ def train_sac(config: SACConfig):
             for step in range(config.max_steps_per_episode):
                 action = agent.select_action(state)
 
-                next_state, reward, terminated, truncated, _ = env.step(action)
+                next_state, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
 
                 agent.replay_buffer.push(state, action, reward, next_state, done)
@@ -265,7 +263,9 @@ def train_sac(config: SACConfig):
             pbar.set_postfix({
                 'rew': f'{episode_reward:.2f}', 
                 'avg_rew': f'{np.mean(episode_rewards[-config.log_interval:]):.2f}' if len(episode_rewards) >= config.log_interval else 'N/A',
-                'stp_used': episode_steps
+                'stp_used': episode_steps,
+                'finish': info['finish'],
+                'fail': info['fail'],
             })
             pbar.update(1) # 更新进度条1步
 
@@ -406,11 +406,7 @@ def test_model(config: SACConfig, model_path_override=None):
 # --- 7. 主运行逻辑 ---
 if __name__ == "__main__":
     # 实例化配置类
-    config = SACConfig(env_name="affine_gym_env/AffineEnv")
-    # 可以通过修改 config 实例的属性来调整参数
-    # config.num_episodes = 500
-    # config.lr = 1e-3
-    # config.smoothing_window = 20 # 调整平滑窗口大小
+    config = SACConfig(env_name=TrainArg.ENV_NAME)
 
     print(f"Starting training for {config.env_name} with configuration:")
     for attr, value in vars(config).items():

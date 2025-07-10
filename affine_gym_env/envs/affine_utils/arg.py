@@ -16,21 +16,23 @@ class MapArg:
 
     CIRCLE_POS = np.array([[25.0, 0.0],[75.0, 0.0]])*MAP_SCALE
     CIRCLE_RADIUS = 2.0*MAP_SCALE
-    RECTANGLE_POS = np.array([[50.0, 6.25],[50.0, -6.25]])*MAP_SCALE
-    RECTANGLE_SIZE = np.array([25.0, 5.0])*MAP_SCALE
+    RECTANGLE_SIZE = np.array([25.0, 6.0])*MAP_SCALE
+    RECT_Y = MAX_Y - RECTANGLE_SIZE[1]*0.5
+    RECTANGLE_POS = np.array([[50.0*MAP_SCALE, RECT_Y],[50.0*MAP_SCALE, -RECT_Y]])
+    
 
 class AgentArg:
     NUM_LEADERS = 3
-    GOAL_RADIUS = 1.0
+    GOAL_RADIUS = 2.0
     AGENT_RADIUS = 1.5
 
     NOMINAL_CONFIG = np.array([np.array([0.0, 0.0]),
                                np.array([-1.0, 1.0])*4*AGENT_RADIUS,
                                np.array([-1.0, -1.0])*4*AGENT_RADIUS])
-    LEADER_SPAWN = NOMINAL_CONFIG + np.array([10.0, 0.0])
+    LEADER_SPAWN = NOMINAL_CONFIG + np.array([20.0, 0.0])
 
     LIDAR_NUM_RAYS = 16
-    LIDAR_MAX_RANGE = 30
+    LIDAR_MAX_RANGE = 20
     LIDAR_FOV = 2*np.pi
 
     MAX_VEL = 6.0
@@ -52,23 +54,24 @@ class AgentArg:
     KD = 0.1
 
 class RewardArg:
-    TOL_COLLIDE_TIMES = 8
+    TOL_COLLIDE_TIMES = 12
 
+    R_TOGOAL = 120
     R_GOAL = 500
-    R_MOVE = 20
-    R_DIR = 2
+    R_MOVE = 15
+    R_DIR = 5
 
-    P_SLOW = -20
-    P_FAIL = -100
-    P_DANGER = -0.05
-    P_COLLIDE = -4
+    P_SLOW = -50
+    P_FAIL = -500
+    P_DANGER = -0.08
+    P_COLLIDE = -10
     P_FORM_ERROR = -0.2
-    P_TIME = -0.05
+    P_TIME = -0.5
 
 class TrainArg:
     ENV_NAME = "affine_gym_env/AffineEnv"
-    NUM_EP = 20000 # 训练的总回合数
-    EP_MAX_STEP = 500 # 每个回合的最大步数
+    NUM_EP = 120_00 # 训练的总回合数
+    EP_MAX_STEP = 600 # 每个回合的最大步数
     LOG_INTERVAL = 10 # 每隔多少个回合打印一次日志
     NUM_TEST_EP = 5 # 测试回合数
     SMOOTH = 15 # 奖励曲线平滑窗口大小

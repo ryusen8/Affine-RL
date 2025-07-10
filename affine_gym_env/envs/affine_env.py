@@ -150,11 +150,12 @@ class AffineEnv(gym.Env):
 
     def _get_info(self):
         #TODO 加入碰撞计数器
-        return {}
+        return {"finish":self.finish, "fail":self.fail}
 
     def reset(self, seed=MapArg.SEED, options=None):
         super().reset(seed=seed)
-
+        self.finish = False
+        self.fail = False
         self.leader_pos = np.array(self.leader_spawn)
         self.leader_acc = np.zeros((self.num_leader, 2))
         self.leader_vel = np.zeros((self.num_leader, 2))
@@ -213,25 +214,30 @@ class AffineEnv(gym.Env):
     def reward(self, obs):
         total_reward = 0
         rew_goal = 0.0
+        pen_slow = 0.0
         self.danger_count = 0
         self.collide_rays = 0
         done = False
         leader_meas = obs["leader_meas"]
         formation_error = obs["formation_error"]
+
+        #TODO 设计要考虑到奖励的期望而不是单步奖励的大小
         
-        #* 完成任务奖励 rew_goal
-        if np.linalg.norm(self.leader_pos[0] - self.goal_pos) < self.goal_radius:
+        #* 完成任务奖励 rew_togoal, rew_goal
+        dist_to_goal = np.linalg.norm(self.leader_pos[0] - self.goal_pos)
+        rew_togoal = RewardArg.R_TOGOAL / dist_to_goal
+        if dist_to_goal < 2 * self.goal_radius:
             rew_goal = RewardArg.R_GOAL
+            self.finish = True
             done = True
 
         #* 移动和朝向奖励 rew_move, rew_dir
-        move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - np.linalg.norm(self.leader_pos[0] - self.goal_pos)
-        dist_to_goal = np.linalg.norm(self.leader_pos[0] - self.goal_pos)
+        move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - dist_to_goal
         goal_dir = self.goal_pos - self.old_pos[0]
         move_dir = self.leader_pos[0] - self.old_pos[0]
 
         rew_dir = RewardArg.R_DIR * np.dot(goal_dir, move_dir) / (np.linalg.norm(goal_dir) + 1e-6)
-        rew_move = RewardArg.R_MOVE * (move_length - 0.1*dist_to_goal) + rew_dir
+        rew_move = RewardArg.R_MOVE * move_length + rew_dir
         
         #* 滞留惩罚 pen_slow
         leader_speed = np.linalg.norm(self.leader_vel[0])
@@ -248,7 +254,7 @@ class AffineEnv(gym.Env):
         for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            self.danger_count += np.sum(meas < (self.agent_radius * 2))
+            self.danger_count += np.sum(meas < (self.agent_radius * 2.5))
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
             self.collide_rays += np.sum(meas <= self.agent_radius)
         if self.collide_rays > 2:
@@ -256,12 +262,14 @@ class AffineEnv(gym.Env):
 
         pen_danger = RewardArg.P_DANGER * self.danger_count
         pen_collide = RewardArg.P_COLLIDE * self.collide_rays
-        
-        if self.collide_count >= self.num_leader * RewardArg.TOL_COLLIDE_TIMES:
+
+        if self.collide_count >= RewardArg.TOL_COLLIDE_TIMES:
             pen_collide += RewardArg.P_FAIL
+            self.fail = True #? NEEDED?
             done = True
 
-        total_reward = rew_goal + rew_move + pen_collide + pen_danger + pen_form_error + pen_time + pen_slow
+        total_reward = rew_togoal + rew_goal + rew_move + \
+                        pen_collide + pen_danger + pen_form_error + pen_time + pen_slow
         return total_reward, done
 
     def _init_render(self):

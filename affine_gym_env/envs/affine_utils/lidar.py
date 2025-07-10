@@ -44,6 +44,8 @@ class Lidar:
                 obstacle_dists = self._ray_intersect_circle(agent_pos, ray_directions, obstacle)
             elif isinstance(obstacle, Rectangle):
                 obstacle_dists = self._ray_intersect_rectangle(agent_pos, ray_directions, obstacle)
+            elif isinstance(obstacle, Line):
+                obstacle_dists = self._ray_intersect_line(agent_pos, ray_directions, obstacle)
             else:
                 continue
 
