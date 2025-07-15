@@ -19,7 +19,19 @@ class MapArg:
     RECTANGLE_SIZE = np.array([25.0, 6.0])*MAP_SCALE
     RECT_Y = MAX_Y - RECTANGLE_SIZE[1]*0.5
     RECTANGLE_POS = np.array([[50.0*MAP_SCALE, RECT_Y],[50.0*MAP_SCALE, -RECT_Y]])
-    
+    COLOR = {
+            "BACKGROUND": (255, 255, 255),
+            "BOUNDARY": (0, 0, 0),
+            "OBSTACLE": (150, 150, 150),
+            "GOAL": (0, 255, 0),
+            "LEADER": (0, 0, 255),
+            "FIRST": (255, 0, 0),
+            "LIDAR_RAY": (200, 200, 200), # 调浅一点
+            "FIRST_TRAIL": (255, 150, 150),
+            "LEADER_TRAIL": (150, 150, 255),
+            "TARGET_FORMATION": ((173, 216, 230),(182,60,27)),
+            "HUD_TEXT": (50, 50, 50),
+        }
 
 class AgentArg:
     NUM_LEADERS = 3
@@ -27,61 +39,64 @@ class AgentArg:
     AGENT_RADIUS = 1.5
 
     NOMINAL_CONFIG = np.array([np.array([0.0, 0.0]),
-                               np.array([-1.0, 1.0])*4*AGENT_RADIUS,
-                               np.array([-1.0, -1.0])*4*AGENT_RADIUS])
+                                np.array([-1.0, 1.0])*6*AGENT_RADIUS,
+                                np.array([-1.0, -1.0])*6*AGENT_RADIUS])
     LEADER_SPAWN = NOMINAL_CONFIG + np.array([20.0, 0.0])
 
     LIDAR_NUM_RAYS = 16
     LIDAR_MAX_RANGE = 20
-    LIDAR_FOV = 2*np.pi
+    LIDAR_FOV = 1.5*np.pi
 
-    MAX_VEL = 6.0
-    MIN_VEL = -6.0
-    MAX_ACC = 2
-    MIN_ACC = -2
-    TOL_ERROR = 2*AGENT_RADIUS
+    MAX_VEL = 12.0
+    MIN_VEL = -12.0
+    MAX_ACC = 3
+    MIN_ACC = -3
+    TOL_ERROR = 3*AGENT_RADIUS
 
     # 仿射变换参数
     MAX_ROT = np.pi
     MIN_ROT = -np.pi
     MAX_SCALE = 2.0
-    MIN_SCALE = 0.5
-    MAX_SHEAR = 1.0
-    MIN_SHEAR = -1.0
+    MIN_SCALE = 0.4
+    MAX_SHEAR = 1.7
+    MIN_SHEAR = -1.7
 
     # PID控制真实领导者位移
     KP = 0.2
     KD = 0.1
 
 class RewardArg:
-    TOL_COLLIDE_TIMES = 12
+    TOL_COLLIDE_TIMES = 6
 
-    R_TOGOAL = 120
+    R_TOGOAL = 150
     R_GOAL = 500
-    R_MOVE = 15
+    R_MOVE = 10
     R_DIR = 5
 
-    P_SLOW = -50
-    P_FAIL = -500
-    P_DANGER = -0.08
-    P_COLLIDE = -10
-    P_FORM_ERROR = -0.2
-    P_TIME = -0.5
+    # P_SLOW = -50
+    P_OVERSPEED = -2.0
+    P_FAIL = -800
+    P_DANGER = -1
+    P_COLLIDE = -20
+    P_FORM_ERROR = -0.1
+    P_TIME = -1.5
 
 class TrainArg:
     ENV_NAME = "affine_gym_env/AffineEnv"
-    NUM_EP = 120_00 # 训练的总回合数
-    EP_MAX_STEP = 600 # 每个回合的最大步数
-    LOG_INTERVAL = 10 # 每隔多少个回合打印一次日志
+    NUM_EP = 50_00 # 训练的总回合数
+    EP_MAX_STEP = 400 # 每个回合的最大步数
+    LOG_INTERVAL = 10 # 每隔多少个回合打印一次日志.
+    GIF_INTERVAL = 500
     NUM_TEST_EP = 5 # 测试回合数
     SMOOTH = 15 # 奖励曲线平滑窗口大小
-
+    REWARD_SCALE = 0.1
     # SAC 算法超参数
-    ACTOR_LR = 1e-4
-    CRITIC_LR = 1e-4
-    ALPHA_LR = 1e-4 # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
+    LR = 2e-4
+    ACTOR_LR = LR
+    CRITIC_LR = LR
+    ALPHA_LR = LR # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
     GAMMA = 0.99 # 折扣因子
-    TAU = 0.01 # 软更新因子
+    TAU = 0.005 # 软更新因子
     ALPHA_INIT = 0.2 # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
     BUFFER_SIZE = 1_000_000 # 经验回放缓冲区容量
     BATCH_SIZE = 256 # 训练批次大小

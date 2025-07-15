@@ -2,16 +2,16 @@ import numpy as np
 import pygame
 import gymnasium as gym
 from gymnasium import spaces
-from collections import deque # 导入 deque 用于轨迹保存
+from collections import deque
 
-# 测试时用
-# from affine_utils.lidar import Lidar
-# from affine_utils.obstacles import Circle, Rectangle
-# from affine_utils.arg import MapArg, AgentArg, RewardArg
-# 训练时用
-from .affine_utils.lidar import Lidar
-from .affine_utils.obstacles import Circle, Rectangle, Line
-from .affine_utils.arg import MapArg, AgentArg, RewardArg
+try: # 训练时用
+    from .affine_utils.lidar import Lidar
+    from .affine_utils.obstacles import Circle, Rectangle, Line
+    from .affine_utils.arg import MapArg, AgentArg, RewardArg
+except ImportError : # 测试时用
+    from affine_utils.lidar import Lidar
+    from affine_utils.obstacles import Circle, Rectangle, Line
+    from affine_utils.arg import MapArg, AgentArg, RewardArg
 
 class AffineEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
@@ -61,11 +61,17 @@ class AffineEnv(gym.Env):
             Rectangle(center=self.rectangle_pos[1], size=self.rectangle_size, angle=0.0),
             Circle(center=self.circle_pos[0], radius=self.circle_radius),
             Circle(center=self.circle_pos[1], radius=self.circle_radius),
-            Line(p1=np.array([self.min_x, self.max_y]), p2=np.array([self.max_x, self.max_y])), # 上边界
-            Line(p1=np.array([self.min_x, self.min_y]), p2=np.array([self.max_x, self.min_y])), # 下边界
-            Line(p1=np.array([self.min_x, self.min_y]), p2=np.array([self.min_x, self.max_y])), # 左边界
-            Line(p1=np.array([self.max_x, self.min_y]), p2=np.array([self.max_x, self.max_y])), # 右边界
+            Rectangle(center=np.array([self.max_x/2, self.max_y+2.5]), # 上边界
+                        size=np.array([self.max_x, 5]), angle=0.0),
+            Rectangle(center=np.array([self.max_x/2, self.min_y-2.5]), # 下边界
+                        size=np.array([self.max_x, 5]), angle=0.0),
+            Rectangle(center=np.array([self.min_x-2.5, 0.0]), # 左边界
+                        size=np.array([5, self.max_y - self.min_y]), angle=0.0),
+            Rectangle(center=np.array([self.max_x+2.5, 0.0]), # 右边界
+                        size=np.array([5, self.max_y - self.min_y]), angle=0.0),         
         ])
+        self.num_obstacles = 8
+
         self.goal_radius = MapArg.GOAL_RADIUS
         self.goal_pos = MapArg.GOAL_POS
 
@@ -81,10 +87,14 @@ class AffineEnv(gym.Env):
         self.lidar = Lidar(n_rays=self.lidar_num_rays, max_range=self.lidar_max_range, fov=self.lidar_fov)
 
         self.action_space = spaces.Dict({
-            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float64),
-            "rot": spaces.Box(low=AgentArg.MIN_ROT, high=AgentArg.MAX_ROT, dtype=np.float64),
-            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE]), dtype=np.float64),
-            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR]), dtype=np.float64),
+            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), 
+                                high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float64),
+            "rot": spaces.Box(low=AgentArg.MIN_ROT, 
+                                high=AgentArg.MAX_ROT, dtype=np.float64),
+            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), 
+                                high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE]), dtype=np.float64),
+            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), 
+                                high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR]), dtype=np.float64),
             },
             seed=seed)
         
@@ -105,18 +115,12 @@ class AffineEnv(gym.Env):
         self.screen = None
         self.clock = None
 
+        self.font = None
+        self.step_count = 0
+        self.last_action = {}
+
         # 定义颜色
-        self.COLORS = {
-            "BACKGROUND": (255, 255, 255), # 白色
-            "BOUNDARY": (0, 0, 0),         # 黑色
-            "OBSTACLE": (150, 150, 150),   # 灰色
-            "GOAL": (0, 255, 0),           # 绿色
-            "LEADER": (0, 0, 255),    # 蓝色
-            "FIRST": (255, 0, 0),
-            "LIDAR_RAY": (150, 150, 150),    # 灰色
-            "FIRST_TRAIL": (255, 150, 150),
-            "LEADER_TRAIL": (150, 150, 255),    # 浅蓝，用于实际领导者轨迹
-        }
+        self.COLORS = MapArg.COLOR
 
         # 轨迹缓冲区设置
         self.trail_length = 100 # 轨迹点数
@@ -149,7 +153,6 @@ class AffineEnv(gym.Env):
         }
 
     def _get_info(self):
-        #TODO 加入碰撞计数器
         return {"finish":self.finish, "fail":self.fail}
 
     def reset(self, seed=MapArg.SEED, options=None):
@@ -159,17 +162,24 @@ class AffineEnv(gym.Env):
         self.leader_pos = np.array(self.leader_spawn)
         self.leader_acc = np.zeros((self.num_leader, 2))
         self.leader_vel = np.zeros((self.num_leader, 2))
-
+        self.reward_info = {'rew_togoal':0.0, 'rew_goal':0.0, 'rew_move':0.0, 'rew_dir':0.0,
+                            'pen_collide':0.0, 'pen_danger':0.0, 'pen_form_error':0.0,
+                            'pen_time':0.0, 'pen_overspeed':0.0,}
         # 重置轨迹缓冲区
         for i in range(self.num_leader):
             self.leader_trails[i].clear()
             self.leader_trails[i].append(self.leader_pos[i].copy()) # 保存初始位置
 
         # 保存上一时刻位置用来计算奖励
-        self.old_pos = self.leader_pos
-        self.target_pos = self.leader_pos
-        # self.danger_count = 0
+        self.old_pos = self.leader_pos.copy()
+        self.target_pos = self.leader_pos.copy()
         self.collide_count = 0
+        self.crash = False
+
+        # <--- 新增: 重置步数和上一动作信息 ---
+        self.step_count = 0
+        self.last_action = {"acc": np.zeros(2), "rot": 0.0, "scale": np.ones(2), "shear": np.zeros(2)}
+
         obs = self._get_obs()
         info = self._get_info()
 
@@ -179,6 +189,10 @@ class AffineEnv(gym.Env):
         return obs, info
 
     def step(self, action):
+        # <--- 新增: 保存步数和动作信息 ---
+        self.step_count += 1
+        self.last_action = action
+
         acc = np.array(action["acc"], )
         rot = np.float64(action["rot"])
         scale = np.array(action["scale"], )
@@ -237,12 +251,12 @@ class AffineEnv(gym.Env):
         move_dir = self.leader_pos[0] - self.old_pos[0]
 
         rew_dir = RewardArg.R_DIR * np.dot(goal_dir, move_dir) / (np.linalg.norm(goal_dir) + 1e-6)
-        rew_move = RewardArg.R_MOVE * move_length + rew_dir
+        rew_move = RewardArg.R_MOVE * move_length
         
         #* 滞留惩罚 pen_slow
-        leader_speed = np.linalg.norm(self.leader_vel[0])
-        if np.abs(leader_speed) < 0.1*AgentArg.MAX_VEL and move_length < 0.5*self.agent_radius:
-            pen_slow = RewardArg.P_SLOW
+        # leader_speed = np.linalg.norm(self.leader_vel[0])
+        # if np.abs(leader_speed) < 0.1*AgentArg.MAX_VEL and move_length < 0.5*self.agent_radius:
+        #     pen_slow = RewardArg.P_SLOW
 
         #* 队形误差惩罚 pen_form_error
         pen_form_error = RewardArg.P_FORM_ERROR * np.sum(formation_error)
@@ -254,22 +268,47 @@ class AffineEnv(gym.Env):
         for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            self.danger_count += np.sum(meas < (self.agent_radius * 2.5))
+            self.danger_count += np.sum(meas[:self.num_obstacles] <= (self.agent_radius * 8)) \
+                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 2.5))
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
-            self.collide_rays += np.sum(meas <= self.agent_radius)
+            self.collide_rays += np.sum(meas[:self.num_obstacles] <= self.agent_radius * 4) \
+                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 1.5))
+            
+            self.crash += np.any(meas<=0.1)
+
         if self.collide_rays > 2:
             self.collide_count += 1
 
         pen_danger = RewardArg.P_DANGER * self.danger_count
         pen_collide = RewardArg.P_COLLIDE * self.collide_rays
 
-        if self.collide_count >= RewardArg.TOL_COLLIDE_TIMES:
+        if self.collide_count >= RewardArg.TOL_COLLIDE_TIMES or self.crash:
             pen_collide += RewardArg.P_FAIL
-            self.fail = True #? NEEDED?
+            self.fail = True
             done = True
 
-        total_reward = rew_togoal + rew_goal + rew_move + \
-                        pen_collide + pen_danger + pen_form_error + pen_time + pen_slow
+        # 根据最近距离，计算一个动态的“安全速度上限”
+        # 这里使用一个简单的线性映射：
+        # 当距离为0时，安全速度为0
+        # 当距离为最大探测范围的一半时，安全速度为最大速度的一半，以此类推
+        # 你可以调整 AgentArg.LIDAR_MAX_RANGE 后面的系数来改变映射的陡峭程度
+        pen_overspeed = 0.0
+        min_dist_to_obstacle = np.min(leader_meas[0])
+        safe_speed = AgentArg.MAX_VEL * (min_dist_to_obstacle / (AgentArg.LIDAR_MAX_RANGE * 0.8))
+        safe_speed = np.clip(safe_speed, 0, AgentArg.MAX_VEL) # 确保安全速度在合理范围内
+        current_speed = np.linalg.norm(self.leader_vel[0])
+        # 如果当前速度超过了安全速度，则给予惩罚
+        if current_speed > safe_speed:
+            # 惩罚大小与超速的程度成正比
+            speed_diff = current_speed - safe_speed
+            pen_overspeed = RewardArg.P_OVERSPEED * speed_diff 
+
+        self.reward_info = {'rew_togoal':rew_togoal, 'rew_goal':rew_goal, 'rew_move':rew_move, 'rew_dir':rew_dir,
+                            'pen_collide':pen_collide, 'pen_danger':pen_danger, 'pen_form_error':pen_form_error,
+                            'pen_time':pen_time, 'pen_overspeed':pen_overspeed,}
+        
+        total_reward = rew_togoal + rew_goal + rew_move + rew_dir \
+                        +pen_collide + pen_danger + pen_form_error + pen_time + pen_overspeed
         return total_reward, done
 
     def _init_render(self):
@@ -283,6 +322,10 @@ class AffineEnv(gym.Env):
                 self.screen = pygame.Surface((self.screen_width, self.screen_height))
         if self.clock is None and self.render_mode == "human":
             self.clock = pygame.time.Clock()
+
+        if self.font is None:
+            pygame.font.init() # 确保字体模块已初始化
+            self.font = pygame.font.SysFont("Arial", 18) # 使用常见的字体和大小
 
     def render(self):
         if self.screen is None and (self.render_mode == "human" or self.render_mode == "rgb_array"):
@@ -305,6 +348,7 @@ class AffineEnv(gym.Env):
                 center_screen = world_to_screen(obs_obj.center)
                 radius_screen = int(obs_obj.radius * self.scale_factor)
                 pygame.draw.circle(canvas, self.COLORS["OBSTACLE"], center_screen, radius_screen)
+                
             elif isinstance(obs_obj, Rectangle):
                 rect_center_screen = world_to_screen(obs_obj.center)
                 half_width_screen = int(obs_obj.size[0] / 2 * self.scale_factor)
@@ -326,11 +370,11 @@ class AffineEnv(gym.Env):
                 pygame.draw.polygon(canvas, self.COLORS["OBSTACLE"], rotated_corners)
 
         # --- 绘制地图边界 ---
-        pygame.draw.rect(canvas, self.COLORS["BOUNDARY"],
-                        (int(self.padding_px + self.horizontal_extra_padding_px),
-                        int(self.padding_px + self.vertical_extra_padding_px),
-                        int(self.scaled_world_width_px),
-                        int(self.scaled_world_height_px)), 2)
+        # pygame.draw.rect(canvas, self.COLORS["BOUNDARY"],
+        #                 (int(self.padding_px + self.horizontal_extra_padding_px),
+        #                 int(self.padding_px + self.vertical_extra_padding_px),
+        #                 int(self.scaled_world_width_px),
+        #                 int(self.scaled_world_height_px)), 2)
         # --- 绘制终点 ---
         goal_center_screen = world_to_screen(self.goal_pos)
         goal_radius_screen = int(self.goal_radius * self.scale_factor)
@@ -345,6 +389,15 @@ class AffineEnv(gym.Env):
                     alpha_factor = (j + 1) / self.trail_length
                     current_color = tuple([int(c * alpha_factor + (255 * (1 - alpha_factor))) for c in self.COLORS["LEADER_TRAIL"]]) if i!=0 else tuple([int(c * alpha_factor + (255 * (1 - alpha_factor))) for c in self.COLORS["FIRST_TRAIL"]])
                     pygame.draw.line(canvas, current_color, points_screen[j], points_screen[j+1], 2)
+        
+        # <--- 新增: 绘制期望队形 ---
+        # 确保 target_pos 已经存在
+        if hasattr(self, 'target_pos') and self.target_pos is not None:
+            agent_radius_screen = int(self.agent_radius * self.scale_factor)
+            for i in range(self.num_leader-1):
+                target_pos_screen = world_to_screen(self.target_pos[i+1])
+                # 用浅蓝色绘制一个空心圆圈来表示期望位置
+                pygame.draw.circle(canvas, self.COLORS["TARGET_FORMATION"][i-1], target_pos_screen, agent_radius_screen, 2)
 
         # --- 绘制实际领导者 ---
         agent_radius_screen = int(self.agent_radius * self.scale_factor)
@@ -364,6 +417,61 @@ class AffineEnv(gym.Env):
                 pygame.draw.line(canvas, self.COLORS["LIDAR_RAY"], leader_screen, ray_end_screen, 1)
 
             pygame.draw.circle(canvas, self.COLORS["LEADER"] if i!=0 else self.COLORS["FIRST"], leader_screen, agent_radius_screen)
+        
+        # <--- 新增: 在屏幕左上角绘制文本信息 ---
+        if hasattr(self, 'last_action') and self.last_action:
+            # 从 last_action 字典中获取动作分量
+            acc = self.last_action.get("acc", [0, 0])
+            rot_val = self.last_action.get("rot", 0)
+            scale = self.last_action.get("scale", [1, 1])
+            shear = self.last_action.get("shear", [0, 0])
+
+            # 关键修复：如果 rot_val 是Numpy类型，使用 .item() 转换成标准Python数字
+            if isinstance(rot_val, np.ndarray):
+                rot = rot_val.item()
+            else:
+                rot = rot_val            
+            # 创建要显示的文本列表
+            info_texts = [
+                f"Step: {self.step_count}",
+                f"Acc: [{acc[0]:.2f}, {acc[1]:.2f}]",
+                f"Rot: {rot:.2f}",  # 现在 rot 是一个数字，可以安全格式化
+                f"Scale: [{scale[0]:.2f}, {scale[1]:.2f}]",
+                f"Shear: [{shear[0]:.2f}, {shear[1]:.2f}]"
+            ]
+            # self.reward_info = {'rew_togoal':rew_togoal, 'rew_goal':rew_goal, 'rew_move':rew_move,
+            #                     'pen_collide':pen_collide, 'pen_danger':pen_danger, 'pen_form_error':pen_form_error,
+            #                     'pen_time':pen_time, 'pen_overspeed':pen_overspeed,}            
+            rew_texts = [
+                f"rew_togoal: {self.reward_info['rew_togoal']:.3f}",
+                f"rew_goal: {self.reward_info['rew_goal']:.3f}",
+                f"rew_move: {self.reward_info['rew_move']:.3f}",
+                f"rew_dir: {self.reward_info['rew_dir']:.3f}",
+
+            ]
+            pen_texts = [
+                f"pen_collide: {self.reward_info['pen_collide']:.3f}",
+                f"pen_danger: {self.reward_info['pen_danger']:.3f}",
+                f"pen_form_error: {self.reward_info['pen_form_error']:.3f}",
+                f"pen_time: {self.reward_info['pen_time']:.3f}",
+                f"pen_overspeed: {self.reward_info['pen_overspeed']:.3f}",
+            ]            
+            # 逐行渲染并绘制到画布上
+            y_offset = 10
+            for text in info_texts:
+                text_surface = self.font.render(text, True, self.COLORS["HUD_TEXT"])
+                canvas.blit(text_surface, (10, y_offset))
+                y_offset += 22 # 为下一行文本增加Y轴偏移
+            y_offset = 10
+            for text in rew_texts:
+                text_surface = self.font.render(text, True, self.COLORS["HUD_TEXT"])
+                canvas.blit(text_surface, (200, y_offset))
+                y_offset += 22 # 为下一行文本增加Y轴偏移
+            y_offset = 10
+            for text in pen_texts:
+                text_surface = self.font.render(text, True, self.COLORS["HUD_TEXT"])
+                canvas.blit(text_surface, (400, y_offset))
+                y_offset += 22 # 为下一行文本增加Y轴偏移
 
         if self.render_mode == "human":
             pygame.event.pump()
@@ -462,12 +570,12 @@ if __name__ == "__main__":
     obs, info = env.reset()
 
     # 打印初始观测，确认数据结构
-    print("Initial Observation Keys:", obs.keys())
-    print("Leader X Pos:", obs["leader_x"])
-    print("Leader Y Pos:", obs["leader_y"])
-    print("Leader Lidar Meas Shape:", obs["leader_meas"].shape)
+    # print("Initial Observation Keys:", obs.keys())
+    # print("Leader X Pos:", obs["leader_x"])
+    # print("Leader Y Pos:", obs["leader_y"])
+    # print("Leader Lidar Meas Shape:", obs["leader_meas"].shape)
 
-    num_steps = 500 # 运行的步数
+    num_steps = 250 # 运行的步数
     total_reward = 0
 
     for step_count in range(num_steps):
@@ -484,7 +592,7 @@ if __name__ == "__main__":
             print(f"Reward: {reward:.2f}")
             print(f"Total Reward: {total_reward:.2f}")
             # env.leader_pos 是最新的位置
-            print(f"Leader Lidar Meas Min: {np.min(obs['leader_meas']):.2f}, Max: {np.max(obs['leader_meas']):.2f}")
+            # print(f"Leader Lidar Meas Min: {np.min(obs['leader_meas']):.2f}, Max: {np.max(obs['leader_meas']):.2f}")
 
         # 如果达到终止条件
         if terminated or truncated:
