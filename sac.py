@@ -13,6 +13,7 @@ from tqdm import tqdm
 from my_wrappers import DictActionWrapper, DictObservationWrapper
 import affine_gym_env
 from affine_gym_env.envs.affine_utils.arg import TrainArg
+import imageio # <--- 新增: 导入 imageio 库用于创建 GIF
 
 # --- 0. 参数配置类 ---
 class SACConfig:
@@ -46,13 +47,18 @@ class SACConfig:
 
         # 测试参数
         self.num_test_episodes = TrainArg.NUM_TEST_EP # 测试回合数
-
+        # <--- 新增: GIF 保存相关的参数 ---
+        self.gif_save_interval = TrainArg.GIF_INTERVAL # 每隔多少个回合保存一次 GIF
+        self.gif_fps = 60 # 生成的 GIF 的帧率
+        self.reward_scale = TrainArg.REWARD_SCALE
 # --- 1. 定义网络结构 ---
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_size, log_std_min, log_std_max):
         super(Actor, self).__init__()
         self.fc1 = nn.Linear(state_dim, hidden_size)
+        self.ln1 = nn.LayerNorm(hidden_size) # 新增: 第一个归一化层
         self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.ln2 = nn.LayerNorm(hidden_size) # 新增: 第二个归一化层
         self.mean_linear = nn.Linear(hidden_size, action_dim)
         self.log_std_linear = nn.Linear(hidden_size, action_dim)
 
@@ -60,8 +66,15 @@ class Actor(nn.Module):
         self.log_std_max = log_std_max
 
     def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
+        # x = torch.relu(self.fc1(state))
+        # x = torch.relu(self.fc2(x))
+        x = self.fc1(state)
+        x = self.ln1(x) # 应用
+        x = torch.relu(x)
+        
+        x = self.fc2(x)
+        x = self.ln2(x) # 应用
+        x = torch.relu(x)
         mean = self.mean_linear(x)
         log_std = self.log_std_linear(x)
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
@@ -75,7 +88,7 @@ class Actor(nn.Module):
         y_t = torch.tanh(x_t)
         action = y_t
         log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(1 - y_t.pow(2) + 1e-6).sum(1, keepdim=True)
+        # log_prob -= torch.log(1 - y_t.pow(2) + 1e-6).sum(1, keepdim=True)
         return action, log_prob
 
 class Critic(nn.Module):
@@ -83,24 +96,46 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         # Q1 network
         self.fc1_q1 = nn.Linear(state_dim + action_dim, hidden_size)
+        self.ln1_q1 = nn.LayerNorm(hidden_size) # 新增
         self.fc2_q1 = nn.Linear(hidden_size, hidden_size)
+        self.ln2_q1 = nn.LayerNorm(hidden_size) # 新增
         self.fc3_q1 = nn.Linear(hidden_size, 1)
 
         # Q2 network
         self.fc1_q2 = nn.Linear(state_dim + action_dim, hidden_size)
+        self.ln1_q2 = nn.LayerNorm(hidden_size) # 新增
         self.fc2_q2 = nn.Linear(hidden_size, hidden_size)
+        self.ln2_q2 = nn.LayerNorm(hidden_size) # 新增
         self.fc3_q2 = nn.Linear(hidden_size, 1)
 
     def forward(self, state, action):
         sa = torch.cat([state, action], dim=1)
 
-        q1 = torch.relu(self.fc1_q1(sa))
-        q1 = torch.relu(self.fc2_q1(q1))
+        # q1 = torch.relu(self.fc1_q1(sa))
+        # q1 = torch.relu(self.fc2_q1(q1))
+        # q1 = self.fc3_q1(q1)
+
+        # q2 = torch.relu(self.fc1_q2(sa))
+        # q2 = torch.relu(self.fc2_q2(q2))
+        # q2 = self.fc3_q2(q2)
+
+        # --- 修改点: 在 Q1 中应用层归一化 ---
+        q1 = self.fc1_q1(sa)
+        q1 = self.ln1_q1(q1)
+        q1 = torch.relu(q1)
+        q1 = self.fc2_q1(q1)
+        q1 = self.ln2_q1(q1)
+        q1 = torch.relu(q1)
         q1 = self.fc3_q1(q1)
 
-        q2 = torch.relu(self.fc1_q2(sa))
-        q2 = torch.relu(self.fc2_q2(q2))
-        q2 = self.fc3_q2(q2)
+        # --- 修改点: 在 Q2 中应用层归一化 ---
+        q2 = self.fc1_q2(sa)
+        q2 = self.ln1_q2(q2)
+        q2 = torch.relu(q2)
+        q2 = self.fc2_q2(q2)
+        q2 = self.ln2_q2(q2)
+        q2 = torch.relu(q2)
+        q2 = self.fc3_q2(q2)        
         return q1, q2
 
 # --- 2. 经验回放缓冲区 ---
@@ -207,6 +242,60 @@ class SAC:
         for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
+def test_and_save_gif(agent, config, episode, save_path):
+    """
+    用当前模型测试一个回合，并将渲染过程保存为 GIF。
+    
+    参数:
+    - agent: 正在训练的 SAC agent 实例。
+    - config: SACConfig 实例。
+    - episode: 当前的回合数，用于打印日志。
+    - save_path: GIF 文件的完整保存路径。
+    """
+    frames = []
+    # 创建一个用于测试和渲染的环境，渲染模式为 "rgb_array" 以便获取图像帧
+    test_env = gym.make(config.env_name, render_mode="rgb_array")
+    
+    # 确保应用与训练时相同的环境装饰器
+    if isinstance(test_env.observation_space, gym.spaces.Dict):
+        test_env = DictObservationWrapper(test_env)
+    if isinstance(test_env.action_space, gym.spaces.Dict):
+        test_env = DictActionWrapper(test_env)
+
+    try:
+        state, _ = test_env.reset()
+        
+        # 关键：将 actor 网络设置为评估模式
+        agent.actor.eval()
+        
+        # 运行一个完整的回合
+        for step in range(config.max_steps_per_episode):
+            # 渲染当前帧并存入列表
+            frame = test_env.render()
+            frames.append(frame)
+            
+            # 选择确定性动作进行评估
+            action = agent.select_action(state, evaluate=True)
+            next_state, _, terminated, truncated, _ = test_env.step(action)
+            done = terminated or truncated
+            state = next_state
+            
+            if done:
+                break
+        
+        print(f"\nEpisode {episode}: Saving preview GIF to {save_path}...")
+        # 使用 imageio 保存帧序列为 GIF
+        imageio.mimsave(save_path, frames, fps=config.gif_fps)
+        print("GIF saved successfully.")
+
+    except Exception as e:
+        print(f"Error during GIF generation for episode {episode}: {e}")
+    finally:
+        # 无论成功与否，都要关闭测试环境
+        test_env.close()
+        # 关键：将 actor 网络恢复为训练模式
+        agent.actor.train()
+
 # --- 4. 训练函数 ---
 def train_sac(config: SACConfig):
     env = gym.make(config.env_name, render_mode="rgb_array")
@@ -233,7 +322,17 @@ def train_sac(config: SACConfig):
     episode_rewards = []
     
     total_steps = 0
-    
+
+    # 存放gif、模型和奖励曲线的文件夹
+    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    folder_name = f"AffineEnv_SAC_{run_timestamp}"
+    save_dir = os.path.join("test_model", folder_name)
+    os.makedirs(save_dir, exist_ok=True)
+
+    run_gif_dir = os.path.join(save_dir, f"train_preview")
+    os.makedirs(run_gif_dir, exist_ok=True)
+    print(f"Training preview GIFs will be saved in: {run_gif_dir}")   
+
     # 使用 tqdm 包装训练循环
     with tqdm(total=config.num_episodes, desc=f"{config.env_name} w/ SAC") as pbar:
         for episode in range(config.num_episodes):
@@ -244,9 +343,10 @@ def train_sac(config: SACConfig):
                 action = agent.select_action(state)
 
                 next_state, reward, terminated, truncated, info = env.step(action)
+                scaled_reward = reward * config.reward_scale
                 done = terminated or truncated
 
-                agent.replay_buffer.push(state, action, reward, next_state, done)
+                agent.replay_buffer.push(state, action, scaled_reward, next_state, done)
                 agent.update()
 
                 state = next_state
@@ -264,34 +364,26 @@ def train_sac(config: SACConfig):
                 'rew': f'{episode_reward:.2f}', 
                 'avg_rew': f'{np.mean(episode_rewards[-config.log_interval:]):.2f}' if len(episode_rewards) >= config.log_interval else 'N/A',
                 'stp_used': episode_steps,
-                'finish': info['finish'],
-                'fail': info['fail'],
+                # 'finish': info['finish'],
+                # 'fail': info['fail'],
             })
             pbar.update(1) # 更新进度条1步
-
-            # if (episode + 1) % config.log_interval == 0:
-            #     avg_reward_log = np.mean(episode_rewards[-config.log_interval:])
-            #     print(f"Episode: {episode + 1}/{config.num_episodes}, Avg Reward: {avg_reward_log:.2f}, Total Steps: {total_steps}, Alpha: {agent.alpha.item():.4f}")
+            # <--- 新增: 定期测试并保存 GIF ---
+            # 检查是否达到保存间隔，并且不是第0个回合
+            if (episode + 1) % config.gif_save_interval == 0 and episode > 0:
+                gif_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                # 构造 GIF 文件名：时间戳 + episode轮数.gif
+                gif_filename = f"{gif_timestamp}_ep{episode + 1}.gif"
+                gif_path = os.path.join(run_gif_dir, gif_filename)
+                
+                # 调用测试和保存函数
+                test_and_save_gif(agent, config, episode + 1, gif_path)
 
     env.close()
-
-    # --- 保存结果到带时间戳和奖励的文件夹 ---
+    
+    # --- 保存结果到带时间戳和奖励的文件夹 ---    
     saved_model_path = None # 用于存储最终的模型路径
     if config.save_results:
-        # 计算最后log_interval回合的平均奖励作为文件夹名的一部分
-        final_avg_reward = np.mean(episode_rewards[-config.log_interval:]) if len(episode_rewards) >= config.log_interval else np.mean(episode_rewards)
-
-        # 获取当前时间并格式化
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-        # 创建文件夹名，使其与模型文件命名规则一致
-        # 将小数点替换为下划线，以避免文件名中的特殊字符问题
-        folder_name = f"{config.env_name}_SAC_{timestamp}_Reward{final_avg_reward:.2f}".replace('.', '_')
-
-        # 创建完整路径
-        save_dir = os.path.join("train_results", folder_name)
-        os.makedirs(save_dir, exist_ok=True)
-
         # 模型文件名
         model_filename = "sac_actor_model.pth"
         saved_model_path = os.path.join(save_dir, model_filename)
@@ -336,7 +428,7 @@ def plot_rewards(rewards, env_name, smoothing_window=1, save_path=None):
 
 # --- 6. 测试模型并渲染 ---
 def test_model(config: SACConfig, model_path_override=None):
-    env = gym.make(config.env_name, render_mode="human")
+    env = gym.make(config.env_name, render_mode="rgb_array")
 
     # 检查并应用 Dict Wrappers (与训练时保持一致)
     if isinstance(env.observation_space, gym.spaces.Dict):
@@ -353,10 +445,10 @@ def test_model(config: SACConfig, model_path_override=None):
     # 确定模型加载路径
     model_to_load = model_path_override
     if not model_to_load: # 如果没有显式指定，则尝试查找最新模型
-        print("No specific model path provided for testing. Attempting to find the latest model in 'results' directory.")
+        print("No specific model path provided for testing. Attempting to find the latest model in 'test_model' directory.")
         latest_run_dir = None
-        if os.path.exists("results"):
-            run_dirs = [os.path.join("results", d) for d in os.listdir("results") if os.path.isdir(os.path.join("results", d))]
+        if os.path.exists("test_model"):
+            run_dirs = [os.path.join("test_model", d) for d in os.listdir("test_model") if os.path.isdir(os.path.join("test_model", d))]
             if run_dirs:
                 # Sort by modification time (most recent first)
                 run_dirs.sort(key=os.path.getmtime, reverse=True) 
@@ -364,11 +456,11 @@ def test_model(config: SACConfig, model_path_override=None):
                 model_to_load = os.path.join(latest_run_dir, "sac_actor_model.pth") # 确保文件名一致
                 print(f"Found latest model: {model_to_load}")
             else:
-                print("No run directories found in 'results'. Cannot test.")
+                print("No run directories found in 'test_model'. Cannot test.")
                 env.close()
                 return
         else:
-            print("'results' directory not found. Cannot test.")
+            print("'test_model' directory not found. Cannot test.")
             env.close()
             return
 
@@ -384,10 +476,17 @@ def test_model(config: SACConfig, model_path_override=None):
     agent.actor.eval() # Set actor to evaluation mode
 
     test_rewards = []
+    frames = [] # <--- 新增: 用于存储第一个回合的帧
+
     for episode in range(config.num_test_episodes):
         state, _ = env.reset()
         episode_reward = 0
-        for step in range(env.spec.max_episode_steps): 
+        max_steps = env.spec.max_episode_steps if env.spec.max_episode_steps else config.max_steps_per_episode
+        for step in range(max_steps): 
+            # <--- 修改: 仅在第一个回合捕获帧 ---
+            if episode == 0:
+                frame = env.render()
+                frames.append(frame)
             action = agent.select_action(state, evaluate=True)
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -398,6 +497,19 @@ def test_model(config: SACConfig, model_path_override=None):
                 break
         test_rewards.append(episode_reward)
         print(f"Test Episode {episode + 1}: Reward = {episode_reward:.2f}")
+
+    # <--- 新增: 在所有测试回合结束后，保存第一个回合的 GIF ---
+    if frames:
+        # 确定 GIF 的保存路径，与模型在同一个文件夹下
+        model_dir = os.path.dirname(model_to_load)
+        gif_path = os.path.join(model_dir, "final_test_preview.gif")
+        
+        try:
+            print(f"\nSaving final test preview GIF to: {gif_path}")
+            imageio.mimsave(gif_path, frames, fps=config.gif_fps)
+            print("GIF saved successfully.")
+        except Exception as e:
+            print(f"Error saving final test GIF: {e}")
 
     avg_test_reward = np.mean(test_rewards)
     print(f"Average Test Reward over {config.num_test_episodes} episodes: {avg_test_reward:.2f}")
