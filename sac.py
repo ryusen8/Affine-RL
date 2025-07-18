@@ -10,14 +10,14 @@ import random
 import os
 from datetime import datetime
 from tqdm import tqdm
-from my_wrappers import DictActionWrapper, DictObservationWrapper
+from my_wrappers import DictActionWrapper, DictObservationWrapper, NormalizeObservationWrapper
 import affine_gym_env
 from affine_gym_env.envs.affine_utils.arg import TrainArg
 import imageio # <--- 新增: 导入 imageio 库用于创建 GIF
 
 # --- 0. 参数配置类 ---
 class SACConfig:
-    def __init__(self, env_name="Pendulum-v1"):
+    def __init__(self, env_name="affine_gym_env/AffineEnv"):
         self.env_name = env_name
         self.num_episodes = TrainArg.NUM_EP # 训练的总回合数
         self.max_steps_per_episode = TrainArg.EP_MAX_STEP # 每个回合的最大步数
@@ -36,8 +36,8 @@ class SACConfig:
 
         # Actor 网络参数
         self.actor_hidden_size = TrainArg.ACTOR_HIDDEN_SIZE
-        self.log_std_min = -20
-        self.log_std_max = 2
+        self.log_std_min = TrainArg.LOG_STD_MIN
+        self.log_std_max = TrainArg.LOG_STD_MAX
 
         # Critic 网络参数
         self.critic_hidden_size = TrainArg.CRITIC_HIDDEN_SIZE
@@ -49,116 +49,203 @@ class SACConfig:
         self.num_test_episodes = TrainArg.NUM_TEST_EP # 测试回合数
         # <--- 新增: GIF 保存相关的参数 ---
         self.gif_save_interval = TrainArg.GIF_INTERVAL # 每隔多少个回合保存一次 GIF
-        self.gif_fps = 60 # 生成的 GIF 的帧率
+        self.gif_fps = TrainArg.GIF_FPS # 生成的 GIF 的帧率
         self.reward_scale = TrainArg.REWARD_SCALE
+
 # --- 1. 定义网络结构 ---
 class Actor(nn.Module):
+    """
+    升级版的 Actor 网络，借鉴了 ElegantRL 的设计。
+    - 分离式网络结构：共享的状态特征提取 + 独立的均值/标准差头。
+    - 混合激活函数：结合使用 ReLU 和 Hardswish。
+    - 集成层归一化（LayerNorm）以增强稳定性。
+    """
     def __init__(self, state_dim, action_dim, hidden_size, log_std_min, log_std_max):
         super(Actor, self).__init__()
-        self.fc1 = nn.Linear(state_dim, hidden_size)
-        self.ln1 = nn.LayerNorm(hidden_size) # 新增: 第一个归一化层
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.ln2 = nn.LayerNorm(hidden_size) # 新增: 第二个归一化层
-        self.mean_linear = nn.Linear(hidden_size, action_dim)
-        self.log_std_linear = nn.Linear(hidden_size, action_dim)
+        
+        # 1. 共享的状态特征提取网络 (State Feature Extractor)
+        #    负责将高维的状态映射到一个有意义的特征向量。
+        self.net_state = nn.Sequential(
+            nn.Linear(state_dim, hidden_size),
+            nn.LayerNorm(hidden_size), # 在激活函数前进行归一化
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU()
+        )
+        
+        # 2. 计算动作均值(mean)的“头”网络
+        #    使用 Hardswish 增加非线性表达能力。
+        self.net_mean = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Hardswish(),
+            nn.Linear(hidden_size // 2, action_dim)
+        )
+        
+        # 3. 计算动作对数标准差(log_std)的“头”网络
+        self.net_log_std = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Hardswish(),
+            nn.Linear(hidden_size // 2, action_dim)
+        )
 
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        
+        # 为数值稳定的 log_prob 计算做准备
+        self.soft_plus = nn.Softplus()
+        self.log_sqrt_2pi = np.log(np.sqrt(2 * np.pi))
 
     def forward(self, state):
-        # x = torch.relu(self.fc1(state))
-        # x = torch.relu(self.fc2(x))
-        x = self.fc1(state)
-        x = self.ln1(x) # 应用
-        x = torch.relu(x)
+        """
+        前向传播，计算均值和对数标准差。
+        """
+        # 首先通过共享网络提取状态特征
+        state_feature = self.net_state(state)
+        # 然后基于特征分别计算均值和对数标准差
+        mean = self.net_mean(state_feature)
+        log_std = self.net_log_std(state_feature)
         
-        x = self.fc2(x)
-        x = self.ln2(x) # 应用
-        x = torch.relu(x)
-        mean = self.mean_linear(x)
-        log_std = self.log_std_linear(x)
+        # 裁剪 log_std 到一个合理的范围，防止标准差过大或过小
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
+        
         return mean, log_std
 
     def sample(self, state):
+        """
+        采样一个动作，并计算其对数概率（使用数值稳定方法）。
+        """
         mean, log_std = self.forward(state)
-        std = log_std.exp()
-        normal = Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        y_t = torch.tanh(x_t)
-        action = y_t
-        log_prob = normal.log_prob(x_t)
-        # log_prob -= torch.log(1 - y_t.pow(2) + 1e-6).sum(1, keepdim=True)
+        
+        # 1. 创建高斯噪声
+        noise = torch.randn_like(mean)
+        # 2. 通过重参数化技巧得到应用 tanh 之前的动作
+        pre_tanh_action = mean + log_std.exp() * noise
+        
+        # 3. 计算高斯分布的 log_prob (数值稳定版)
+        log_prob = -(log_std + self.log_sqrt_2pi + noise.pow(2) / 2)
+
+        # 4. 应用 tanh 变换的修正 (数值稳定版)
+        log_prob -= 2 * (np.log(2.0) - pre_tanh_action - self.soft_plus(-2.0 * pre_tanh_action))
+
+        # 5. 对多维动作的 log_prob 求和，使其成为一个标量
+        if len(log_prob.shape) > 1:
+            log_prob = log_prob.sum(dim=1, keepdim=True)
+
+        # 6. 计算最终动作
+        action = torch.tanh(pre_tanh_action)
+        
         return action, log_prob
 
 class Critic(nn.Module):
+    """
+    升级版的 Critic 网络，遵循 Twin-Critic 设计。
+    - 包含两个独立的Q网络 (Q1, Q2) 以缓解Q值高估。
+    - 每个网络内部借鉴 ElegantRL 的结构，并集成层归一化。
+    """
     def __init__(self, state_dim, action_dim, hidden_size):
         super(Critic, self).__init__()
-        # Q1 network
-        self.fc1_q1 = nn.Linear(state_dim + action_dim, hidden_size)
-        self.ln1_q1 = nn.LayerNorm(hidden_size) # 新增
-        self.fc2_q1 = nn.Linear(hidden_size, hidden_size)
-        self.ln2_q1 = nn.LayerNorm(hidden_size) # 新增
-        self.fc3_q1 = nn.Linear(hidden_size, 1)
 
-        # Q2 network
-        self.fc1_q2 = nn.Linear(state_dim + action_dim, hidden_size)
-        self.ln1_q2 = nn.LayerNorm(hidden_size) # 新增
-        self.fc2_q2 = nn.Linear(hidden_size, hidden_size)
-        self.ln2_q2 = nn.LayerNorm(hidden_size) # 新增
-        self.fc3_q2 = nn.Linear(hidden_size, 1)
+        # --- Q1 网络 ---
+        self.net_q1 = nn.Sequential(
+            nn.Linear(state_dim + action_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.Hardswish(), # 在最后一层前使用 Hardswish
+            nn.Linear(hidden_size, 1)
+        )
+
+        # --- Q2 网络 ---
+        # 结构与 Q1 完全相同，但不共享任何权重。
+        self.net_q2 = nn.Sequential(
+            nn.Linear(state_dim + action_dim, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.Hardswish(),
+            nn.Linear(hidden_size, 1)
+        )
 
     def forward(self, state, action):
-        sa = torch.cat([state, action], dim=1)
-
-        # q1 = torch.relu(self.fc1_q1(sa))
-        # q1 = torch.relu(self.fc2_q1(q1))
-        # q1 = self.fc3_q1(q1)
-
-        # q2 = torch.relu(self.fc1_q2(sa))
-        # q2 = torch.relu(self.fc2_q2(q2))
-        # q2 = self.fc3_q2(q2)
-
-        # --- 修改点: 在 Q1 中应用层归一化 ---
-        q1 = self.fc1_q1(sa)
-        q1 = self.ln1_q1(q1)
-        q1 = torch.relu(q1)
-        q1 = self.fc2_q1(q1)
-        q1 = self.ln2_q1(q1)
-        q1 = torch.relu(q1)
-        q1 = self.fc3_q1(q1)
-
-        # --- 修改点: 在 Q2 中应用层归一化 ---
-        q2 = self.fc1_q2(sa)
-        q2 = self.ln1_q2(q2)
-        q2 = torch.relu(q2)
-        q2 = self.fc2_q2(q2)
-        q2 = self.ln2_q2(q2)
-        q2 = torch.relu(q2)
-        q2 = self.fc3_q2(q2)        
+        """
+        前向传播，计算两个Q值。
+        """
+        # 将状态和动作拼接成一个输入向量
+        sa_input = torch.cat([state, action], dim=1)
+        
+        # 分别通过两个网络计算Q值
+        q1 = self.net_q1(sa_input)
+        q2 = self.net_q2(sa_input)
+        
         return q1, q2
 
 # --- 2. 经验回放缓冲区 ---
 class ReplayBuffer:
-    def __init__(self, capacity, device):
-        self.buffer = deque(maxlen=capacity)
+    """
+    一个高性能的经验回放缓冲区，借鉴了 ElegantRL 的设计思想。
+    - 在初始化时预分配连续的 PyTorch 张量内存。
+    - 使用循环指针进行高效的数据写入。
+    - 采样时使用高级索引，避免 Python 循环。
+    """
+    def __init__(self, capacity: int, state_dim: int, action_dim: int, device):
+        self.capacity = capacity
         self.device = device
 
+        # 预分配内存。所有数据都直接存储在目标设备上 (CPU 或 GPU)
+        # 1. 存储状态 (s_t)
+        self.states = torch.zeros((capacity, state_dim), dtype=torch.float32, device=device)
+        # 2. 存储下一个状态 (s_{t+1})
+        self.next_states = torch.zeros((capacity, state_dim), dtype=torch.float32, device=device)
+        # 3. 存储动作 (a_t)
+        self.actions = torch.zeros((capacity, action_dim), dtype=torch.float32, device=device)
+        # 4. 存储奖励 (r_t) 和完成标志 (done_t)
+        self.rewards = torch.zeros((capacity, 1), dtype=torch.float32, device=device)
+        self.dones = torch.zeros((capacity, 1), dtype=torch.float32, device=device)
+
+        # 循环指针和当前大小
+        self.ptr = 0
+        self.size = 0
+
     def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        """
+        将一个 transition 存入缓冲区。
+        输入都应该是 NumPy 数组或标量。
+        """
+        # 使用循环指针直接写入预分配的张量
+        # 我们在这里进行从 NumPy 到 Torch Tensor 并移动到设备的转换
+        self.states[self.ptr] = torch.from_numpy(state).to(self.device)
+        self.actions[self.ptr] = torch.from_numpy(action).to(self.device)
+        self.rewards[self.ptr] = reward
+        self.next_states[self.ptr] = torch.from_numpy(next_state).to(self.device)
+        self.dones[self.ptr] = done
         
-        return (torch.tensor(np.array(states), dtype=torch.float32).to(self.device),
-                torch.tensor(np.array(actions), dtype=torch.float32).to(self.device),
-                torch.tensor(np.array(rewards), dtype=torch.float32).unsqueeze(1).to(self.device),
-                torch.tensor(np.array(next_states), dtype=torch.float32).to(self.device),
-                torch.tensor(np.array(dones), dtype=torch.float32).unsqueeze(1).to(self.device))
+        # 更新指针和大小
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
 
-    def __len__(self):
-        return len(self.buffer)
+    def sample(self, batch_size: int) -> tuple:
+        """
+        从缓冲区中随机采样一个批次的数据。
+        """
+        # 1. 用 torch.randint 快速生成一批随机索引 (在 GPU 上生成，如果 device 是 cuda)
+        indices = torch.randint(0, self.size, (batch_size,), device=self.device)
+
+        # 2. 利用高级索引，一步到位地从缓冲区中取出所有数据
+        #    这个过程没有 CPU-GPU 数据传输，因为数据已经在目标设备上了
+        return (
+            self.states[indices],
+            self.actions[indices],
+            self.rewards[indices],
+            self.next_states[indices],
+            self.dones[indices]
+        )
+
+    def __len__(self) -> int:
+        """返回当前缓冲区中的样本数量。"""
+        return self.size
 
 # --- 3. SAC 算法核心 ---
 class SAC:
@@ -182,7 +269,12 @@ class SAC:
         self.log_alpha = nn.Parameter(torch.zeros(1, requires_grad=True, device=device))
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=config.alpha_lr)
 
-        self.replay_buffer = ReplayBuffer(config.buffer_capacity, device)
+        self.replay_buffer = ReplayBuffer(
+            capacity=config.buffer_capacity,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            device=device
+        )
 
         self.action_scale = torch.tensor((action_space.high - action_space.low) / 2.0, dtype=torch.float32, device=device)
         self.action_bias = torch.tensor((action_space.high + action_space.low) / 2.0, dtype=torch.float32, device=device)
@@ -298,16 +390,18 @@ def test_and_save_gif(agent, config, episode, save_path):
 
 # --- 4. 训练函数 ---
 def train_sac(config: SACConfig):
+
     env = gym.make(config.env_name, render_mode="rgb_array")
-    
+
     # 检查并应用 Dict Wrappers
     if isinstance(env.observation_space, gym.spaces.Dict):
-        # print("Applying DictObservationWrapper...")
         env = DictObservationWrapper(env)
     if isinstance(env.action_space, gym.spaces.Dict):
-        # print("Applying DictActionWrapper...")
         env = DictActionWrapper(env)
-    
+
+    # env = NormalizeObservationWrapper(env)
+    # env = DictActionWrapper(env)    
+
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
     action_space = env.action_space
@@ -331,10 +425,29 @@ def train_sac(config: SACConfig):
 
     run_gif_dir = os.path.join(save_dir, f"train_preview")
     os.makedirs(run_gif_dir, exist_ok=True)
-    print(f"Training preview GIFs will be saved in: {run_gif_dir}")   
+    # print(f"Training preview GIFs will be saved in: {run_gif_dir}")
 
+    # # --- 新增: 初始随机探索 ---
+    # initial_explore_steps = config.batch_size * 10 # 比如收集10个batch的随机数据
+    # print(f"Collecting initial random samples for {initial_explore_steps} steps...")
+    # state, _ = env.reset()
+    # for _ in range(initial_explore_steps):
+    #     random_action = env.action_space.sample() # 使用环境的随机采样
+    #     next_state, reward, terminated, truncated, info = env.step(random_action)
+    #     done = terminated or truncated
+    #     scaled_reward = reward * config.reward_scale
+    #     agent.replay_buffer.push(state, random_action, scaled_reward, next_state, done)
+    #     if done:
+    #         state, _ = env.reset()
+    #     else:
+    #         state = next_state
+    # print("Initial random sampling complete.")
+
+    # total_steps = initial_explore_steps # 更新总步数计数器
     # 使用 tqdm 包装训练循环
-    with tqdm(total=config.num_episodes, desc=f"{config.env_name} w/ SAC") as pbar:
+    desc = f"{config.env_name} w/ SAC"
+    gradient_steps_per_step = 100
+    with tqdm(total=config.num_episodes, desc=None) as pbar:
         for episode in range(config.num_episodes):
             state, _ = env.reset()
             episode_steps = 0
@@ -345,12 +458,12 @@ def train_sac(config: SACConfig):
                 next_state, reward, terminated, truncated, info = env.step(action)
                 scaled_reward = reward * config.reward_scale
                 done = terminated or truncated
-
                 agent.replay_buffer.push(state, action, scaled_reward, next_state, done)
                 agent.update()
 
                 state = next_state
-                episode_reward += reward
+                # episode_reward += reward
+                episode_reward += scaled_reward
                 total_steps += 1
                 episode_steps += 1
 

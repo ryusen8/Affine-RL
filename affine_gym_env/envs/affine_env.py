@@ -13,9 +13,10 @@ except ImportError : # 测试时用
     from affine_utils.obstacles import Circle, Rectangle, Line
     from affine_utils.arg import MapArg, AgentArg, RewardArg
 
+import warnings
 class AffineEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
-
+    warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated as an API.*")
     def __init__(self, render_mode=None, seed=MapArg.SEED):
         self.dt = MapArg.DT
         self.min_x = MapArg.MIN_X
@@ -61,14 +62,14 @@ class AffineEnv(gym.Env):
             Rectangle(center=self.rectangle_pos[1], size=self.rectangle_size, angle=0.0),
             Circle(center=self.circle_pos[0], radius=self.circle_radius),
             Circle(center=self.circle_pos[1], radius=self.circle_radius),
-            Rectangle(center=np.array([self.max_x/2, self.max_y+2.5]), # 上边界
-                        size=np.array([self.max_x, 5]), angle=0.0),
-            Rectangle(center=np.array([self.max_x/2, self.min_y-2.5]), # 下边界
-                        size=np.array([self.max_x, 5]), angle=0.0),
-            Rectangle(center=np.array([self.min_x-2.5, 0.0]), # 左边界
-                        size=np.array([5, self.max_y - self.min_y]), angle=0.0),
-            Rectangle(center=np.array([self.max_x+2.5, 0.0]), # 右边界
-                        size=np.array([5, self.max_y - self.min_y]), angle=0.0),         
+            Rectangle(center=np.array([self.max_x/2, self.max_y+2.5], dtype=np.float32), # 上边界
+                        size=np.array([self.max_x, 5], dtype=np.float32), angle=0.0),
+            Rectangle(center=np.array([self.max_x/2, self.min_y-2.5], dtype=np.float32), # 下边界
+                        size=np.array([self.max_x, 5], dtype=np.float32), angle=0.0),
+            Rectangle(center=np.array([self.min_x-2.5, 0.0], dtype=np.float32), # 左边界
+                        size=np.array([5, self.max_y - self.min_y], dtype=np.float32), angle=0.0),
+            Rectangle(center=np.array([self.max_x+2.5, 0.0], dtype=np.float32), # 右边界
+                        size=np.array([5, self.max_y - self.min_y], dtype=np.float32), angle=0.0),         
         ])
         self.num_obstacles = 8
 
@@ -79,37 +80,42 @@ class AffineEnv(gym.Env):
         self.leader_spawn = AgentArg.LEADER_SPAWN
         self.leader_pos = self.leader_spawn
         self.agent_radius = AgentArg.AGENT_RADIUS
-
+        self.static_obstacles = list(self.obstacle_array)
+        self.leader_obstacle_circles = [Circle(center=pos, radius=self.agent_radius) 
+                                        for pos in self.leader_pos]
+        self.all_scan_obstacles = self.static_obstacles + self.leader_obstacle_circles
         self.lidar_num_rays = AgentArg.LIDAR_NUM_RAYS
         self.lidar_max_range = AgentArg.LIDAR_MAX_RANGE
         self.lidar_fov = AgentArg.LIDAR_FOV
 
         self.lidar = Lidar(n_rays=self.lidar_num_rays, max_range=self.lidar_max_range, fov=self.lidar_fov)
 
-        self.action_space = spaces.Dict({
-            "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), 
-                                high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float64),
-            "rot": spaces.Box(low=AgentArg.MIN_ROT, 
-                                high=AgentArg.MAX_ROT, dtype=np.float64),
-            "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), 
-                                high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE]), dtype=np.float64),
-            "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), 
-                                high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR]), dtype=np.float64),
-            },
-            seed=seed)
-        
-        self.observation_space = spaces.Dict({
-            "leader_pos": spaces.Box(low=np.array([self.min_x,self.min_y]*self.num_leader).reshape(self.num_leader,2),
-                                    high=np.array([self.max_x,self.max_y]*self.num_leader).reshape(self.num_leader,2), dtype=np.float64),
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self.action_space = spaces.Dict({
+                "acc": spaces.Box(low=np.array([AgentArg.MIN_ACC, AgentArg.MIN_ACC]), 
+                                    high=np.array([AgentArg.MAX_ACC, AgentArg.MAX_ACC]), dtype=np.float32),
+                "rot": spaces.Box(low=AgentArg.MIN_ROT, 
+                                    high=AgentArg.MAX_ROT, dtype=np.float32),
+                "scale": spaces.Box(low=np.array([AgentArg.MIN_SCALE, AgentArg.MIN_SCALE]), 
+                                    high=np.array([AgentArg.MAX_SCALE, AgentArg.MAX_SCALE]), dtype=np.float32),
+                "shear": spaces.Box(low=np.array([AgentArg.MIN_SHEAR, AgentArg.MIN_SHEAR]), 
+                                    high=np.array([AgentArg.MAX_SHEAR, AgentArg.MAX_SHEAR]), dtype=np.float32),
+                },
+                seed=seed)
+            
+            self.observation_space = spaces.Dict({
+                "leader_pos": spaces.Box(low=np.array([self.min_x,self.min_y]*self.num_leader).reshape(self.num_leader,2),
+                                        high=np.array([self.max_x,self.max_y]*self.num_leader).reshape(self.num_leader,2), dtype=np.float32),
 
-            "leader_vel": spaces.Box(low=np.array([AgentArg.MIN_VEL,AgentArg.MIN_VEL]*self.num_leader).reshape(self.num_leader,2),
-                                    high=np.array([AgentArg.MAX_VEL,AgentArg.MAX_VEL]*self.num_leader).reshape(self.num_leader,2), dtype=np.float64), 
+                "leader_vel": spaces.Box(low=np.array([AgentArg.MIN_VEL,AgentArg.MIN_VEL]*self.num_leader).reshape(self.num_leader,2),
+                                        high=np.array([AgentArg.MAX_VEL,AgentArg.MAX_VEL]*self.num_leader).reshape(self.num_leader,2), dtype=np.float32), 
 
-            "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays), dtype=np.float64),
+                "leader_meas": spaces.Box(low=0.0, high=self.lidar_max_range, shape=(self.num_leader, self.lidar_num_rays), dtype=np.float32),
 
-            "formation_error": spaces.Box(low=-AgentArg.TOL_ERROR, high=AgentArg.TOL_ERROR, shape=(self.num_leader-1,), dtype=np.float64), 
-            },
-            seed=seed)
+                "formation_error": spaces.Box(low=-100, high=100, shape=(self.num_leader-1,), dtype=np.float32), 
+                },
+                seed=seed)
 
         self.render_mode = render_mode
         self.screen = None
@@ -128,30 +134,51 @@ class AffineEnv(gym.Env):
         self.leader_trails = [deque(maxlen=self.trail_length) for _ in range(self.num_leader)]
 
     def _get_obs(self):
+        # meas = []
+
+        # all_fixed_obstacles = list(self.obstacle_array)
+
+        # for i, leader_pos in enumerate(self.leader_pos):
+        #     all_leaders_circles = [Circle(center=pos, radius=self.agent_radius) for pos in self.leader_pos]
+
+        #     current_leader_obstacles_for_scan = []
+        #     current_leader_obstacles_for_scan.extend(all_fixed_obstacles)
+        #     for j, other_leader_circle in enumerate(all_leaders_circles):
+        #         if i != j:
+        #             current_leader_obstacles_for_scan.append(other_leader_circle)
+
+        #     # 假设智能体朝向角度是0，如果未来有朝向，需要在这里传入正确的角度
+        #     dist = self.lidar.scan(agent_pos=leader_pos, agent_angle=0.0, obstacles=current_leader_obstacles_for_scan)
+        #     meas.append(dist)
+
+        # return {
+        #     "leader_pos": self.leader_pos,
+        #     "leader_vel": self.leader_vel,
+        #     "leader_meas": np.array(meas),
+        #     "formation_error": np.linalg.norm(self.target_pos[1:] - self.leader_pos[1:], axis=1)
+        # }
+
         meas = []
-
-        all_fixed_obstacles = list(self.obstacle_array)
-
-        for i, leader_pos in enumerate(self.leader_pos):
-            all_leaders_circles = [Circle(center=pos, radius=self.agent_radius) for pos in self.leader_pos]
-
-            current_leader_obstacles_for_scan = []
-            current_leader_obstacles_for_scan.extend(all_fixed_obstacles)
-            for j, other_leader_circle in enumerate(all_leaders_circles):
-                if i != j:
-                    current_leader_obstacles_for_scan.append(other_leader_circle)
-
-            # 假设智能体朝向角度是0，如果未来有朝向，需要在这里传入正确的角度
-            dist = self.lidar.scan(agent_pos=leader_pos, agent_angle=0.0, obstacles=current_leader_obstacles_for_scan)
+        # 直接遍历预先创建好的智能体障碍物列表
+        for i in range(self.num_leader):
+            # 巧妙地通过列表切片来获取“除了自己以外的所有障碍物”
+            # 这比循环和 if 判断要快得多
+            obstacles_for_this_leader = self.static_obstacles + \
+                                        self.leader_obstacle_circles[:i] + \
+                                        self.leader_obstacle_circles[i+1:]
+            
+            dist = self.lidar.scan(agent_pos=self.leader_pos[i], 
+                                    agent_angle=0.0, 
+                                    obstacles=obstacles_for_this_leader)
             meas.append(dist)
 
         return {
             "leader_pos": self.leader_pos,
             "leader_vel": self.leader_vel,
-            "leader_meas": np.array(meas),
+            "leader_meas": np.array(meas, dtype=np.float32), # 指定dtype
             "formation_error": np.linalg.norm(self.target_pos[1:] - self.leader_pos[1:], axis=1)
         }
-
+    
     def _get_info(self):
         return {"finish":self.finish, "fail":self.fail}
 
@@ -159,14 +186,17 @@ class AffineEnv(gym.Env):
         super().reset(seed=seed)
         self.finish = False
         self.fail = False
-        self.leader_pos = np.array(self.leader_spawn)
-        self.leader_acc = np.zeros((self.num_leader, 2))
-        self.leader_vel = np.zeros((self.num_leader, 2))
+        self.leader_pos = self.leader_spawn.copy()
+
+        self.leader_acc = np.zeros((self.num_leader, 2), dtype=np.float32)
+        self.leader_vel = np.zeros((self.num_leader, 2), dtype=np.float32)
         self.reward_info = {'rew_togoal':0.0, 'rew_goal':0.0, 'rew_move':0.0, 'rew_dir':0.0,
                             'pen_collide':0.0, 'pen_danger':0.0, 'pen_form_error':0.0,
                             'pen_time':0.0, 'pen_overspeed':0.0,}
-        # 重置轨迹缓冲区
+        
         for i in range(self.num_leader):
+            self.leader_obstacle_circles[i].center = self.leader_pos[i]
+            # 重置轨迹缓冲区
             self.leader_trails[i].clear()
             self.leader_trails[i].append(self.leader_pos[i].copy()) # 保存初始位置
 
@@ -193,31 +223,36 @@ class AffineEnv(gym.Env):
         self.step_count += 1
         self.last_action = action
 
-        acc = np.array(action["acc"], )
-        rot = np.float64(action["rot"])
-        scale = np.array(action["scale"], )
-        shear = np.array(action["shear"], )
-        acc = np.clip(acc, AgentArg.MIN_ACC, AgentArg.MAX_ACC)
-        rot = np.clip(rot, AgentArg.MIN_ROT, AgentArg.MAX_ROT)
-        scale = np.clip(scale, AgentArg.MIN_SCALE, AgentArg.MAX_SCALE)
-        shear = np.clip(shear, AgentArg.MIN_SHEAR, AgentArg.MAX_SHEAR)
+        acc = np.array(action["acc"], dtype=np.float32)
+        rot = np.float32(action["rot"])
+        scale = np.array(action["scale"], dtype=np.float32)
+        shear = np.array(action["shear"], dtype=np.float32)
+        acc = np.clip(acc, AgentArg.MIN_ACC, AgentArg.MAX_ACC, dtype=np.float32)
+        rot = np.clip(rot, AgentArg.MIN_ROT, AgentArg.MAX_ROT, dtype=np.float32)
+        scale = np.clip(scale, AgentArg.MIN_SCALE, AgentArg.MAX_SCALE, dtype=np.float32)
+        shear = np.clip(shear, AgentArg.MIN_SHEAR, AgentArg.MAX_SHEAR, dtype=np.float32)
         self.old_pos = self.leader_pos.copy()
         # 更新领导者1的状态
         self.leader_acc[0] = acc
         self.leader_vel[0] += self.leader_acc[0] * self.dt
         self.leader_pos[0] += self.leader_vel[0] * self.dt
         # transl = self.leader_pos[0] - self.leader_spawn[0]
-        transl = np.array([0.0, 0.0])
+        transl = np.array([0.0, 0.0], dtype=np.float32)
         self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, transl, scale, shear) + self.leader_pos[0]
         # 更新领导者2和3的状态
         self.leader_acc[1:] = AgentArg.KP * (self.target_pos[1:] - self.leader_pos[1:]) + AgentArg.KD * (self.leader_vel[0] - self.leader_vel[1:])
         self.leader_vel[1:] += self.leader_acc[1:] * self.dt
         self.leader_pos[1:] += self.leader_vel[1:] * self.dt
-        self.leader_pos = np.clip(self.leader_pos, [self.min_x, self.min_y], [self.max_x, self.max_y])
-        self.leader_vel = np.clip(self.leader_vel, AgentArg.MIN_VEL, AgentArg.MAX_VEL)
-
+        self.leader_pos = np.clip(self.leader_pos, [self.min_x, self.min_y], [self.max_x, self.max_y], dtype=np.float32)   
+        self.leader_vel = np.clip(self.leader_vel, AgentArg.MIN_VEL, AgentArg.MAX_VEL, dtype=np.float32)
+        
         for i in range(self.num_leader):
-            self.leader_trails[i].append(self.leader_pos[i].copy())
+            leader_pos_i = self.leader_pos[i]
+            # 更新轨迹（注意这里仍然需要copy，因为deque存储的是引用）
+            self.leader_trails[i].append(leader_pos_i.copy()) 
+            # 更新用于Lidar的Circle障碍物位置
+            self.leader_obstacle_circles[i].center = leader_pos_i
+
         obs = self._get_obs()
         rew, done = self.reward(obs)
         if self.render_mode == "human":
@@ -254,9 +289,9 @@ class AffineEnv(gym.Env):
         rew_move = RewardArg.R_MOVE * move_length
         
         #* 滞留惩罚 pen_slow
-        # leader_speed = np.linalg.norm(self.leader_vel[0])
-        # if np.abs(leader_speed) < 0.1*AgentArg.MAX_VEL and move_length < 0.5*self.agent_radius:
-        #     pen_slow = RewardArg.P_SLOW
+        leader_speed = np.linalg.norm(self.leader_vel[0])
+        if np.abs(leader_speed) < 0.1*AgentArg.MAX_VEL and move_length < 0.5*self.agent_radius:
+            pen_slow = RewardArg.P_SLOW
 
         #* 队形误差惩罚 pen_form_error
         pen_form_error = RewardArg.P_FORM_ERROR * np.sum(formation_error)
@@ -268,11 +303,11 @@ class AffineEnv(gym.Env):
         for i in range(self.num_leader):
             meas = leader_meas[i]
             # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            self.danger_count += np.sum(meas[:self.num_obstacles] <= (self.agent_radius * 8)) \
-                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 2.5))
+            self.danger_count += np.sum(meas[:self.num_obstacles] <= (self.agent_radius * 8), dtype=np.float32) \
+                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 2.5), dtype=np.float32)
             # 碰撞：Lidar 探测到的距离小于或等于智能体半径
-            self.collide_rays += np.sum(meas[:self.num_obstacles] <= self.agent_radius * 4) \
-                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 1.5))
+            self.collide_rays += np.sum(meas[:self.num_obstacles] <= self.agent_radius * 5, dtype=np.float32) \
+                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 1.5), dtype=np.float32)
             
             self.crash += np.any(meas<=0.1)
 
@@ -295,7 +330,7 @@ class AffineEnv(gym.Env):
         pen_overspeed = 0.0
         min_dist_to_obstacle = np.min(leader_meas[0])
         safe_speed = AgentArg.MAX_VEL * (min_dist_to_obstacle / (AgentArg.LIDAR_MAX_RANGE * 0.8))
-        safe_speed = np.clip(safe_speed, 0, AgentArg.MAX_VEL) # 确保安全速度在合理范围内
+        safe_speed = np.clip(safe_speed, 0, AgentArg.MAX_VEL, dtype=np.float32) # 确保安全速度在合理范围内
         current_speed = np.linalg.norm(self.leader_vel[0])
         # 如果当前速度超过了安全速度，则给予惩罚
         if current_speed > safe_speed:
@@ -308,7 +343,7 @@ class AffineEnv(gym.Env):
                             'pen_time':pen_time, 'pen_overspeed':pen_overspeed,}
         
         total_reward = rew_togoal + rew_goal + rew_move + rew_dir \
-                        +pen_collide + pen_danger + pen_form_error + pen_time + pen_overspeed
+                        +pen_collide + pen_danger + pen_form_error + pen_time + pen_overspeed + pen_slow
         return total_reward, done
 
     def _init_render(self):
@@ -490,9 +525,9 @@ class AffineEnv(gym.Env):
     def apply_affine_transform(self,
         agents_coords: np.ndarray,
         rot: float = 0.0,
-        trans: np.ndarray = np.array([0.0, 0.0]),
-        scale: np.ndarray = np.array([1.0, 1.0]),
-        shear: np.ndarray = np.array([0.0, 0.0])
+        trans: np.ndarray = np.array([0.0, 0.0], dtype=np.float32),
+        scale: np.ndarray = np.array([1.0, 1.0], dtype=np.float32),
+        shear: np.ndarray = np.array([0.0, 0.0], dtype=np.float32)
     ) -> np.ndarray:
         """
         对智能体的坐标进行仿射变换。
@@ -507,59 +542,113 @@ class AffineEnv(gym.Env):
         Returns:
             一个 (N, 2) 的 NumPy 数组，表示变换后的智能体坐标。
         """
+            # --- 新增：健壮性处理 ---
+        # 检查 rot 是否为 NumPy 数组，如果是，则提取其中的标量值
+        if isinstance(rot, np.ndarray):
+            rot = rot.item() # .item() 从单元素数组中提取标量
+
+        # 检查 scale 和 shear，确保它们是扁平的 (2,) 向量，而不是 (1, 2) 或 (2, 1)
+        scale = np.ravel(scale)
+        shear = np.ravel(shear)
+        # --- 结束新增 ---
+
         num_agents = agents_coords.shape[0]
+        coords_homogeneous = np.hstack((agents_coords, np.ones((num_agents, 1), dtype=np.float32)))
 
-        # 1. 创建齐次坐标
-        # 将 (x, y) 转换为 (x, y, 1) 以便进行矩阵乘法
-        coords_homogeneous = np.hstack((agents_coords, np.ones((num_agents, 1))))
+        # --- 优化点：直接计算组合变换矩阵 (这部分保持不变) ---
+        cos_r = np.cos(rot) # 现在 rot 保证是标量，cos_r 和 sin_r 也是标量
+        sin_r = np.sin(rot)
+        sx, sy = scale
+        shx, shy = shear
+        tx, ty = trans
 
-        # 2. 构建变换矩阵 (3x3)
+        m11 = cos_r * sx + sin_r * shy * sx
+        m12 = cos_r * shx * sy - sin_r * sy
+        m13 = tx
+        
+        m21 = sin_r * sx - cos_r * shy * sx
+        m22 = sin_r * shx * sy + cos_r * sy
+        m23 = ty
 
-        # 2.1 旋转矩阵
-        cos_rot = np.cos(rot)
-        sin_rot = np.sin(rot)
-        rot_matrix = np.array([
-            [cos_rot, -sin_rot, 0],
-            [sin_rot,  cos_rot, 0],
-            [0,        0,       1]
-        ])
+        transformation_matrix = np.array([
+            [m11, m12, m13],
+            [m21, m22, m23],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float32)
 
-        # 2.2 缩放矩阵
-        scale_matrix = np.array([
-            [scale[0], 0,        0],
-            [0,        scale[1], 0],
-            [0,        0,        1]
-        ])
-
-        # 2.3 剪切矩阵
-        shear_matrix = np.array([
-            [1,         shear[0], 0],
-            [shear[1],  1,        0],
-            [0,         0,        1]
-        ])
-
-        # 2.4 平移矩阵
-        trans_matrix = np.array([
-            [1, 0, trans[0]],
-            [0, 1, trans[1]],
-            [0, 0, 1]
-        ])
-
-        # 3. 组合所有变换（注意顺序：缩放 -> 剪切 -> 旋转 -> 平移）
-        # 通常的顺序是先应用线性变换（缩放、剪切、旋转），最后应用平移
-        # 这里我们按照常见的变换顺序，将它们组合成一个单一的变换矩阵
-        # 最终变换矩阵 M = T * R * Sh * S
-        transformation_matrix = trans_matrix @ rot_matrix @ shear_matrix @ scale_matrix
-
-        # 4. 应用变换
-        # 将齐次坐标与变换矩阵相乘
         transformed_coords_homogeneous = (transformation_matrix @ coords_homogeneous.T).T
-
-        # 5. 还原为二维坐标
-        # 丢弃齐次坐标的最后一列 (1)
         transformed_coords = transformed_coords_homogeneous[:, :2]
 
         return transformed_coords
+        # num_agents = agents_coords.shape[0]
+
+        # # 1. 创建齐次坐标
+        # coords_homogeneous = np.hstack((agents_coords, np.ones((num_agents, 1))))
+
+        # cos_r = np.cos(rot)
+        # sin_r = np.sin(rot)
+        # sx, sy = scale
+        # shx, shy = shear
+        # tx, ty = trans
+
+        # # T @ R @ Sh @ S 矩阵乘法展开后的结果
+        # # M = [[m11, m12, m13], [m21, m22, m23], [0, 0, 1]]
+        # m11 = cos_r * sx + sin_r * shy * sx
+        # m12 = cos_r * shx * sy - sin_r * sy
+        # m13 = tx
+        
+        # m21 = sin_r * sx - cos_r * shy * sx
+        # m22 = sin_r * shx * sy + cos_r * sy
+        # m23 = ty
+
+        # # 直接构建最终的变换矩阵
+        # transformation_matrix = np.array([
+        #     [m11, m12, m13],
+        #     [m21, m22, m23],
+        #     [0.0, 0.0, 1.0]
+        # ], dtype=np.float32)
+        
+        # # 2.1 旋转矩阵
+        # cos_rot = np.cos(rot)
+        # sin_rot = np.sin(rot)
+        # rot_matrix = np.array([
+        #     [cos_rot, -sin_rot, 0],
+        #     [sin_rot,  cos_rot, 0],
+        #     [0,        0,       1]
+        # ], dtype=np.float32)
+
+        # # 2.2 缩放矩阵
+        # scale_matrix = np.array([
+        #     [scale[0], 0,        0],
+        #     [0,        scale[1], 0],
+        #     [0,        0,        1]
+        # ], dtype=np.float32)
+
+        # # 2.3 剪切矩阵
+        # shear_matrix = np.array([
+        #     [1,         shear[0], 0],
+        #     [shear[1],  1,        0],
+        #     [0,         0,        1]
+        # ], dtype=np.float32)
+
+        # # 2.4 平移矩阵
+        # trans_matrix = np.array([
+        #     [1, 0, trans[0]],
+        #     [0, 1, trans[1]],
+        #     [0, 0, 1]
+        # ], dtype=np.float32)
+
+        # # 最终变换矩阵 M = T * R * Sh * S
+        # transformation_matrix = trans_matrix @ rot_matrix @ shear_matrix @ scale_matrix
+
+        # # 4. 应用变换
+        # transformed_coords_homogeneous = (transformation_matrix @ coords_homogeneous.T).T
+
+        # # 5. 还原为二维坐标
+        # # 丢弃齐次坐标的最后一列 (1)
+        # transformed_coords = transformed_coords_homogeneous[:, :2]
+
+        # return transformed_coords
 
 if __name__ == "__main__":
     import time
