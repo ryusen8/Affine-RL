@@ -1,8 +1,8 @@
 import numpy as np
 import gymnasium as gym
+from gymnasium.spaces import Box, Dict
 
-# --- Dict Wrappers (如果您有 Dict 类型空间，请确保这部分代码存在并被导入或定义) ---
-class DictObservationWrapper(gym.ObservationWrapper):
+class FlattenDictObservation(gym.ObservationWrapper):
     def __init__(self, env):
         super().__init__(env)
         self.keys = sorted(self.observation_space.spaces.keys()) # 确保您的字典键顺序正确
@@ -20,7 +20,11 @@ class DictObservationWrapper(gym.ObservationWrapper):
             else:
                 raise NotImplementedError(f"Observation space dict contains unsupported space type: {type(space)}. Only Box spaces within Dict are currently supported by this wrapper.")
         
-        self.observation_space = gym.spaces.Box(low=np.array(low_bounds), high=np.array(high_bounds), dtype=np.float32)
+        self.observation_space = gym.spaces.Box(
+            low=np.array(low_bounds, dtype=np.float32),
+            high=np.array(high_bounds, dtype=np.float32),
+            dtype=np.float32
+        )
 
     def observation(self, obs):
         flattened_obs = []
@@ -28,7 +32,7 @@ class DictObservationWrapper(gym.ObservationWrapper):
             flattened_obs.extend(obs[key].flatten().tolist())
         return np.array(flattened_obs, dtype=np.float32)
 
-class DictActionWrapper(gym.ActionWrapper):
+class FlattenDictAction(gym.ActionWrapper):
     def __init__(self, env):
         super().__init__(env)
         self.keys = sorted(self.action_space.spaces.keys()) # 确保与环境定义的一致
@@ -46,7 +50,11 @@ class DictActionWrapper(gym.ActionWrapper):
             else:
                 raise NotImplementedError(f"Action space dict contains unsupported space type: {type(space)}. Only Box spaces within Dict are currently supported by this wrapper.")
         
-        self.action_space = gym.spaces.Box(low=np.array(low_bounds), high=np.array(high_bounds), dtype=np.float32)
+        self.action_space = gym.spaces.Box(
+            low=np.array(low_bounds, dtype=np.float32),
+            high=np.array(high_bounds, dtype=np.float32),
+            dtype=np.float32
+        )
 
     def action(self, action_flat):
         action_dict = {}
@@ -54,7 +62,6 @@ class DictActionWrapper(gym.ActionWrapper):
         for key in self.keys:
             space = self.env.action_space.spaces[key] # 获取原始环境的子空间定义
             size = np.prod(space.shape)
-            action_dict[key] = action_flat[current_idx : current_idx + int(size)].reshape(space.shape)
+            action_dict[key] = np.array(action_flat[current_idx : current_idx + int(size)], dtype=np.float32).reshape(space.shape)
             current_idx += int(size)
         return action_dict
-# --- End of Dict Wrappers ---

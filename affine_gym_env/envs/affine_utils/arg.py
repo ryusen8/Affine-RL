@@ -24,31 +24,43 @@ class MapArg:
             "BOUNDARY": (0, 0, 0),
             "OBSTACLE": (150, 150, 150),
             "GOAL": (0, 255, 0),
-            "LEADER": (0, 0, 255),
-            "FIRST": (255, 0, 0),
-            "LIDAR_RAY": (200, 200, 200), # 调浅一点
+            
+            "FIRST": (255, 35, 96),
+            "LEADER": (0, 125, 255),
+            "FOLLOWER": (34, 216, 99),
             "FIRST_TRAIL": (255, 150, 150),
             "LEADER_TRAIL": (150, 150, 255),
-            "TARGET_FORMATION": ((173, 216, 230),(182,60,27)),
+            "FOLLOWER_TRAIL": (150, 255, 150),
+            "TARGET_FORMATION": ((150, 150, 255),(150, 150, 255),(150, 255, 150)),
+
+            "LIDAR_RAY": (200, 200, 200),
+            "COMM_LINE": (135, 70, 205),           
             "HUD_TEXT": (50, 50, 50),
         }
 
 class AgentArg:
     NUM_LEADERS = 3
+    NUM_FOLLOWERS = 3
+    NUM_AGENTS = NUM_LEADERS + NUM_FOLLOWERS
     GOAL_RADIUS = 2.0
     AGENT_RADIUS = 1.5
+    # NOMINAL_CONFIG = np.array([np.array([0.0, 0.0]),
+    #                             np.array([-1.0, 1.0])*6*AGENT_RADIUS,
+    #                             np.array([-1.0, -1.0])*6*AGENT_RADIUS])
+    # LEADER_SPAWN = NOMINAL_CONFIG + np.array([20.0, 0.0])
+    r_leader = np.array([[np.sqrt(3), 0], [0, 1], [0, -1]], dtype=np.float32) - np.array([np.sqrt(3), 0], dtype=np.float32)
+    r_follower = np.array([[-np.sqrt(3), 2], [-np.sqrt(3), 0], [-np.sqrt(3), -2]], dtype=np.float32) - np.array([np.sqrt(3), 0], dtype=np.float32)
+    NOMINAL_CONFIG_BASE = np.vstack([r_leader, r_follower]).astype(np.float32)
+    NOMINAL_CONFIG = NOMINAL_CONFIG_BASE * 6 * AGENT_RADIUS # 放大队形
+    SPAWN_OFFSET = np.array([50.0, 0.0], dtype=np.float32)
+    AGENT_SPAWN = NOMINAL_CONFIG + SPAWN_OFFSET
 
-    NOMINAL_CONFIG = np.array([np.array([0.0, 0.0]),
-                                np.array([-1.0, 1.0])*6*AGENT_RADIUS,
-                                np.array([-1.0, -1.0])*6*AGENT_RADIUS], dtype=np.float32)
-    LEADER_SPAWN = NOMINAL_CONFIG + np.array([20.0, 0.0], dtype=np.float32)
-
-    LIDAR_NUM_RAYS = 16
+    LIDAR_NUM_RAYS = 12
     LIDAR_MAX_RANGE = 25
     LIDAR_FOV = 1.5*np.pi
 
-    MAX_VEL = 12.0
-    MIN_VEL = -12.0
+    MAX_VEL = 15.0
+    MIN_VEL = -15.0
     MAX_ACC = 4
     MIN_ACC = -4
     TOL_ERROR = 4*AGENT_RADIUS
@@ -62,8 +74,29 @@ class AgentArg:
     MIN_SHEAR = -1.5
 
     # PD控制真实领导者位移
-    KP = 0.2
-    KD = 0.1
+    KP_LEADER = 0.2
+    KD_LEADER = 0.1
+
+    # 基于应力的控制律
+    KP_FOLLOWER = 0.5
+    KV_FOLLOWER = 2.0    
+    STRESS_MATRIX = np.array([
+        [0.3461,    -0.3461,    -0.3461,    0.0,        0.3461,     0.0],
+        [-0.3461,   0.6854,     0.0069,     -0.0420,    -0.6015,    0.2973],
+        [-0.3461,   0.0069,     0.6853,     0.0420,     -0.0908,    -0.2973],
+        [0.0,       -0.0420,    0.0420,     0.0420,     -0.0420,    0.0],
+        [0.3461,    -0.6015,    -0.0908,    -0.0420,    0.6855,     -0.2973],
+        [0.0,       0.2973,     -0.2973,    0.0,        -0.2973,    0.2973]
+    ], dtype=np.float32)
+
+    NEIGHBORS = [
+        np.array([1, 2, 4]),
+        np.array([0, 2, 3, 4, 5]),
+        np.array([0, 1, 3, 4, 5]),
+        np.array([1, 2, 4]),
+        np.array([0, 1, 2, 3, 5]),
+        np.array([1, 2, 4]),
+    ]
 
 class RewardArg:
     TOL_COLLIDE_TIMES = 6
@@ -73,13 +106,14 @@ class RewardArg:
     R_MOVE = 10
     R_DIR = 7
 
-    P_SLOW = -50
+    P_SLOW = -25
     P_OVERSPEED = -3
     P_FAIL = -300
-    P_DANGER = -2
+    P_DANGER = -2.4 #-2
     P_COLLIDE = -30
     P_FORM_ERROR = -0.3
-    P_TIME = 0.0
+    P_TIME = 0.01
+    P_JERK = -0.05
 
 class TrainArg:
     ENV_NAME = "affine_gym_env/AffineEnv"
@@ -91,19 +125,19 @@ class TrainArg:
     GIF_FPS = 30
     NUM_TEST_EP = 2 # 测试回合数
     SMOOTH = 15 # 奖励曲线平滑窗口大小
-    REWARD_SCALE = 0.01
+    REWARD_SCALE = 2 ** -3
     # SAC 算法超参数
     LR = 2e-4
     ACTOR_LR = LR
     CRITIC_LR = LR
     ALPHA_LR = LR # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
-    GAMMA = 0.99 # 折扣因子
-    TAU = 0.005 # 软更新因子
+    GAMMA = 0.98 # 折扣因子
+    TAU = 0.01 # 软更新因子
     ALPHA_INIT = 0.2 # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
-    BUFFER_SIZE = 1_000_000 # 经验回放缓冲区容量
-    BATCH_SIZE = 512 # 训练批次大小
-    LOG_STD_MIN = -5
-    LOG_STD_MAX = 0.0
+    BUFFER_SIZE = 500_000 # 经验回放缓冲区容量
+    BATCH_SIZE = 256 # 训练批次大小
+    LOG_STD_MIN = -10.0
+    LOG_STD_MAX = 1.0
     # 网络参数
     ACTOR_HIDDEN_SIZE = 256
     CRITIC_HIDDEN_SIZE = 256

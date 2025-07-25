@@ -10,10 +10,14 @@ import random
 import os
 from datetime import datetime
 from tqdm import tqdm
-from my_wrappers import DictActionWrapper, DictObservationWrapper, NormalizeObservationWrapper
+from my_wrappers import FlattenDictAction, FlattenDictObservation
+from gymnasium.wrappers import NormalizeObservation
 import affine_gym_env
 from affine_gym_env.envs.affine_utils.arg import TrainArg
-import imageio # <--- 新增: 导入 imageio 库用于创建 GIF
+import imageio
+from torch.amp import GradScaler, autocast
+import cProfile
+import pstats
 
 # --- 0. 参数配置类 ---
 class SACConfig:
@@ -68,10 +72,12 @@ class Actor(nn.Module):
         self.net_state = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
             nn.LayerNorm(hidden_size), # 在激活函数前进行归一化
-            nn.ReLU(),
+            # nn.ReLU(),
+            nn.Hardswish(),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.ReLU()
+            # nn.ReLU()
+            nn.Hardswish(),
         )
         
         # 2. 计算动作均值(mean)的“头”网络
@@ -150,7 +156,8 @@ class Critic(nn.Module):
         self.net_q1 = nn.Sequential(
             nn.Linear(state_dim + action_dim, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.ReLU(),
+            # nn.ReLU(),
+            nn.Hardswish(),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.Hardswish(), # 在最后一层前使用 Hardswish
@@ -162,7 +169,8 @@ class Critic(nn.Module):
         self.net_q2 = nn.Sequential(
             nn.Linear(state_dim + action_dim, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.ReLU(),
+            # nn.ReLU(),
+            nn.Hardswish(),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.Hardswish(),
@@ -196,14 +204,14 @@ class ReplayBuffer:
 
         # 预分配内存。所有数据都直接存储在目标设备上 (CPU 或 GPU)
         # 1. 存储状态 (s_t)
-        self.states = torch.zeros((capacity, state_dim), dtype=torch.float32, device=device)
+        self.states = torch.zeros((capacity, state_dim), device=device)
         # 2. 存储下一个状态 (s_{t+1})
-        self.next_states = torch.zeros((capacity, state_dim), dtype=torch.float32, device=device)
+        self.next_states = torch.zeros((capacity, state_dim), device=device)
         # 3. 存储动作 (a_t)
-        self.actions = torch.zeros((capacity, action_dim), dtype=torch.float32, device=device)
+        self.actions = torch.zeros((capacity, action_dim), device=device)
         # 4. 存储奖励 (r_t) 和完成标志 (done_t)
-        self.rewards = torch.zeros((capacity, 1), dtype=torch.float32, device=device)
-        self.dones = torch.zeros((capacity, 1), dtype=torch.float32, device=device)
+        self.rewards = torch.zeros((capacity, 1), device=device)
+        self.dones = torch.zeros((capacity, 1), device=device)
 
         # 循环指针和当前大小
         self.ptr = 0
@@ -216,11 +224,12 @@ class ReplayBuffer:
         """
         # 使用循环指针直接写入预分配的张量
         # 我们在这里进行从 NumPy 到 Torch Tensor 并移动到设备的转换
-        self.states[self.ptr] = torch.from_numpy(state).to(self.device)
-        self.actions[self.ptr] = torch.from_numpy(action).to(self.device)
-        self.rewards[self.ptr] = reward
-        self.next_states[self.ptr] = torch.from_numpy(next_state).to(self.device)
-        self.dones[self.ptr] = done
+        self.states[self.ptr] = torch.from_numpy(state).to(self.device).float()
+        self.actions[self.ptr] = torch.from_numpy(action).to(self.device).float()
+        # self.rewards[self.ptr] = float(reward)
+        self.rewards[self.ptr] = torch.tensor(reward, device=self.device, dtype=torch.float32)
+        self.next_states[self.ptr] = torch.from_numpy(next_state).to(self.device).float()
+        self.dones[self.ptr] = torch.tensor(done, device=self.device)
         
         # 更新指针和大小
         self.ptr = (self.ptr + 1) % self.capacity
@@ -259,8 +268,12 @@ class SAC:
         self.actor = Actor(state_dim, action_dim, config.actor_hidden_size, config.log_std_min, config.log_std_max).to(device)
         self.critic = Critic(state_dim, action_dim, config.critic_hidden_size).to(device)
         self.critic_target = Critic(state_dim, action_dim, config.critic_hidden_size).to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+    
+        # self.actor = torch.compile(self.actor,mode='default')
+        # self.critic = torch.compile(self.critic,mode='default')
+        # self.critic_target = torch.compile(self.critic_target,mode='default')
 
+        self.critic_target.load_state_dict(self.critic.state_dict())
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=config.actor_lr)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=config.critic_lr)
 
@@ -276,11 +289,12 @@ class SAC:
             device=device
         )
 
-        self.action_scale = torch.tensor((action_space.high - action_space.low) / 2.0, dtype=torch.float32, device=device)
-        self.action_bias = torch.tensor((action_space.high + action_space.low) / 2.0, dtype=torch.float32, device=device)
+        self.action_scale = torch.tensor((action_space.high - action_space.low) / 2.0, device=device)
+        self.action_bias = torch.tensor((action_space.high + action_space.low) / 2.0, device=device)
+        self.scaler = GradScaler()
 
     def select_action(self, state, evaluate=False):
-        state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
+        state = torch.tensor(state).unsqueeze(0).to(self.device)
         if evaluate is False:
             action, _ = self.actor.sample(state)
         else:
@@ -297,37 +311,47 @@ class SAC:
         state_batch, action_batch, reward_batch, next_state_batch, done_batch = self.replay_buffer.sample(self.batch_size)
 
         # --- Critic Loss ---
-        with torch.no_grad():
-            next_action, next_log_prob = self.actor.sample(next_state_batch)
-            # 确保传递给 Critic 目标网络的动作是原始的、未缩放的动作（即环境中的实际动作）
-            next_q1_target, next_q2_target = self.critic_target(next_state_batch, next_action * self.action_scale + self.action_bias) 
-            min_next_q_target = torch.min(next_q1_target, next_q2_target) - self.alpha * next_log_prob
-            target_q = reward_batch + (1 - done_batch) * self.gamma * min_next_q_target
+        with autocast(device_type='cuda'):
+            with torch.no_grad():
+                next_action, next_log_prob = self.actor.sample(next_state_batch)
+                # 确保传递给 Critic 目标网络的动作是原始的、未缩放的动作（即环境中的实际动作）
+                next_q1_target, next_q2_target = self.critic_target(next_state_batch, next_action * self.action_scale + self.action_bias) 
+                min_next_q_target = torch.min(next_q1_target, next_q2_target) - self.alpha * next_log_prob
+                target_q = reward_batch + (1 - done_batch) * self.gamma * min_next_q_target
 
-        current_q1, current_q2 = self.critic(state_batch, action_batch) # 使用回放缓冲区中的原始动作批次
-        critic_loss = torch.mean((current_q1 - target_q).pow(2)) + torch.mean((current_q2 - target_q).pow(2))
+            current_q1, current_q2 = self.critic(state_batch, action_batch) # 使用回放缓冲区中的原始动作批次
+            critic_loss = torch.mean((current_q1 - target_q).pow(2)) + torch.mean((current_q2 - target_q).pow(2))
+
+        # self.critic_optimizer.zero_grad()
+        # critic_loss.backward()
+        # self.critic_optimizer.step()
 
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
+        # 使用 scaler.scale 来放大 loss
+        self.scaler.scale(critic_loss).backward()
+        # 使用 scaler.step 来反缩放梯度并更新
+        self.scaler.step(self.critic_optimizer)
+        # 更新 scaler
+        self.scaler.update()        
 
         # --- Actor Loss ---
-        new_action, log_prob = self.actor.sample(state_batch)
-        # 确保传递给 Critic 的动作是原始的、未缩放的动作
-        q1_new_action, q2_new_action = self.critic(state_batch, new_action * self.action_scale + self.action_bias) 
-        min_q_new_action = torch.min(q1_new_action, q2_new_action)
-        
-        actor_loss = ((self.alpha * log_prob) - min_q_new_action).mean()
+        with autocast(device_type='cuda'):
+            new_action, log_prob = self.actor.sample(state_batch)
+            # 确保传递给 Critic 的动作是原始的、未缩放的动作
+            q1_new_action, q2_new_action = self.critic(state_batch, new_action * self.action_scale + self.action_bias) 
+            min_q_new_action = torch.min(q1_new_action, q2_new_action)
+            actor_loss = ((self.alpha * log_prob) - min_q_new_action).mean()
+            alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
 
         self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
-
-        # --- Alpha (温度) Loss ---
-        alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
+        self.scaler.scale(actor_loss).backward()
+        self.scaler.step(self.actor_optimizer)
+        
         self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
+        self.scaler.scale(alpha_loss).backward()
+        self.scaler.step(self.alpha_optimizer)
+
+        self.scaler.update() # 每次优化器step后都要update
         self.alpha = self.log_alpha.exp()
 
         # --- 更新目标网络 ---
@@ -335,25 +359,11 @@ class SAC:
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
 def test_and_save_gif(agent, config, episode, save_path):
-    """
-    用当前模型测试一个回合，并将渲染过程保存为 GIF。
-    
-    参数:
-    - agent: 正在训练的 SAC agent 实例。
-    - config: SACConfig 实例。
-    - episode: 当前的回合数，用于打印日志。
-    - save_path: GIF 文件的完整保存路径。
-    """
     frames = []
-    # 创建一个用于测试和渲染的环境，渲染模式为 "rgb_array" 以便获取图像帧
     test_env = gym.make(config.env_name, render_mode="rgb_array")
-    
-    # 确保应用与训练时相同的环境装饰器
-    if isinstance(test_env.observation_space, gym.spaces.Dict):
-        test_env = DictObservationWrapper(test_env)
-    if isinstance(test_env.action_space, gym.spaces.Dict):
-        test_env = DictActionWrapper(test_env)
-
+    test_env = FlattenDictObservation(test_env)
+    test_env = NormalizeObservation(test_env) 
+    test_env = FlattenDictAction(test_env)
     try:
         state, _ = test_env.reset()
         
@@ -392,15 +402,9 @@ def test_and_save_gif(agent, config, episode, save_path):
 def train_sac(config: SACConfig):
 
     env = gym.make(config.env_name, render_mode="rgb_array")
-
-    # 检查并应用 Dict Wrappers
-    if isinstance(env.observation_space, gym.spaces.Dict):
-        env = DictObservationWrapper(env)
-    if isinstance(env.action_space, gym.spaces.Dict):
-        env = DictActionWrapper(env)
-
-    # env = NormalizeObservationWrapper(env)
-    # env = DictActionWrapper(env)    
+    env = FlattenDictObservation(env)
+    env = NormalizeObservation(env) 
+    env = FlattenDictAction(env)
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -425,9 +429,8 @@ def train_sac(config: SACConfig):
 
     run_gif_dir = os.path.join(save_dir, f"train_preview")
     os.makedirs(run_gif_dir, exist_ok=True)
-    # print(f"Training preview GIFs will be saved in: {run_gif_dir}")
 
-    # # --- 新增: 初始随机探索 ---
+    # --- 新增: 初始随机探索 ---
     # initial_explore_steps = config.batch_size * 10 # 比如收集10个batch的随机数据
     # print(f"Collecting initial random samples for {initial_explore_steps} steps...")
     # state, _ = env.reset()
@@ -443,8 +446,6 @@ def train_sac(config: SACConfig):
     #         state = next_state
     # print("Initial random sampling complete.")
 
-    # total_steps = initial_explore_steps # 更新总步数计数器
-    # 使用 tqdm 包装训练循环
     desc = f"{config.env_name} w/ SAC"
     gradient_steps_per_step = 100
     with tqdm(total=config.num_episodes, desc=None) as pbar:
@@ -477,8 +478,6 @@ def train_sac(config: SACConfig):
                 'rew': f'{episode_reward:.2f}', 
                 'avg_rew': f'{np.mean(episode_rewards[-config.log_interval:]):.2f}' if len(episode_rewards) >= config.log_interval else 'N/A',
                 'stp_used': episode_steps,
-                # 'finish': info['finish'],
-                # 'fail': info['fail'],
             })
             pbar.update(1) # 更新进度条1步
             # <--- 新增: 定期测试并保存 GIF ---
@@ -543,11 +542,9 @@ def plot_rewards(rewards, env_name, smoothing_window=1, save_path=None):
 def test_model(config: SACConfig, model_path_override=None):
     env = gym.make(config.env_name, render_mode="rgb_array")
 
-    # 检查并应用 Dict Wrappers (与训练时保持一致)
-    if isinstance(env.observation_space, gym.spaces.Dict):
-        env = DictObservationWrapper(env)
-    if isinstance(env.action_space, gym.spaces.Dict):
-        env = DictActionWrapper(env)
+    env = FlattenDictObservation(env)
+    env = NormalizeObservation(env) 
+    env = FlattenDictAction(env)
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -633,13 +630,19 @@ if __name__ == "__main__":
     # 实例化配置类
     config = SACConfig(env_name=TrainArg.ENV_NAME)
 
-    print(f"Starting training for {config.env_name} with configuration:")
-    for attr, value in vars(config).items():
-        print(f"  {attr}: {value}")
+    # print(f"Starting training for {config.env_name} with configuration:")
+    # for attr, value in vars(config).items():
+    #     print(f"  {attr}: {value}")
 
     # 训练 SAC 算法
     # train_sac 现在会返回保存的模型路径
-    rewards, saved_model_path = train_sac(config)
+    profiler = cProfile.Profile()
+    profiler.enable()
+    rewards, saved_model_path = train_sac(config) # 运行你的主函数
+    profiler.disable()
+    stats = pstats.Stats(profiler).sort_stats('tottime') # 按函数自身消耗时间排序
+    stats.print_stats(20) # 打印耗时最长的前20个函数
+    # rewards, saved_model_path = train_sac(config)
 
     # 测试模型并渲染
     # 如果模型成功保存，就用保存的路径进行测试

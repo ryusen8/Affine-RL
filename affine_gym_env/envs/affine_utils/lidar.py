@@ -1,160 +1,146 @@
 import numpy as np
-from dataclasses import dataclass
-from .obstacles import Circle, Rectangle, Line
+import numba
+# 确保你的 obstacles.py 也在同一个文件夹
+from .obstacles import Circle, Rectangle, Line 
 
+# ===================================================================
+# 1. 创建独立的、可被Numba编译的 "纯计算" 函数
+#    这些函数不属于任何类，并且只接收基础数据类型。
+# ===================================================================
+
+@numba.jit(nopython=True, cache=True)
+def _numba_ray_intersect_circle(ray_origin, ray_directions, circle_center, circle_radius, n_rays, max_range):
+    """计算所有射线与单个圆形障碍物的交点距离 (Numba加速版)"""
+    distances = np.full(n_rays, max_range, dtype=np.float32)
+    L = ray_origin.astype(np.float32) - circle_center.astype(np.float32)
+    c = np.dot(L, L) - circle_radius**2
+
+    # 循环遍历每条射线
+    for i in range(n_rays):
+        direction = ray_directions[i].astype(np.float32)
+        b = 2 * np.dot(direction, L)
+        delta = b**2 - 4 * c
+
+        if delta >= 0:
+            sqrt_delta = np.sqrt(delta)
+            t1 = (-b - sqrt_delta) / 2.0
+            
+            # 我们只需要最近的、在射线前方的交点
+            if t1 > 1e-6: # 1e-6 是一个小的容差，避免浮点数误差
+                if t1 < distances[i]:
+                    distances[i] = np.float32(t1)
+            else:
+                t2 = (-b + sqrt_delta) / 2.0
+                if t2 > 1e-6:
+                    if t2 < distances[i]:
+                        distances[i] = np.float32(t2)
+                        
+    return distances
+
+@numba.jit(nopython=True, cache=True)
+def _numba_ray_intersect_rectangle(ray_origin, ray_directions, rect_center, rect_size, rect_angle, n_rays, max_range):
+    """计算所有射线与单个旋转矩形的交点距离 (Numba加速版)"""
+    distances = np.full(n_rays, max_range, dtype=np.float32)
+    half_size = rect_size.astype(np.float32) / 2.0
+    
+    # 坐标系变换
+    local_origin = ray_origin.astype(np.float32) - rect_center.astype(np.float32)
+    angle_to_rotate = -rect_angle
+    cos_a = np.cos(angle_to_rotate)
+    sin_a = np.sin(angle_to_rotate)
+    
+    # Numba中手动进行旋转变换
+    local_origin_rotated_x = local_origin[0] * cos_a - local_origin[1] * sin_a
+    local_origin_rotated_y = local_origin[0] * sin_a + local_origin[1] * cos_a
+    
+    # 循环处理每条射线
+    for i in range(n_rays):
+        # 旋转射线方向
+        dir_x = ray_directions[i, 0]
+        dir_y = ray_directions[i, 1]
+        local_dir_x = dir_x * cos_a - dir_y * sin_a
+        local_dir_y = dir_x * sin_a + dir_y * cos_a
+
+        # Slab Test
+        t_near = np.zeros(2, dtype=np.float32)
+        t_far = np.zeros(2, dtype=np.float32)
+
+        # 处理X方向
+        if abs(local_dir_x) < 1e-6:
+            if -half_size[0] > local_origin_rotated_x or half_size[0] < local_origin_rotated_x:
+                continue # 射线平行于slab且在外部，不可能相交
+        else:
+            t_near[0] = (-half_size[0] - local_origin_rotated_x) / local_dir_x
+            t_far[0] = (half_size[0] - local_origin_rotated_x) / local_dir_x
+        
+        # 处理Y方向
+        if abs(local_dir_y) < 1e-6:
+            if -half_size[1] > local_origin_rotated_y or half_size[1] < local_origin_rotated_y:
+                continue
+        else:
+            t_near[1] = (-half_size[1] - local_origin_rotated_y) / local_dir_y
+            t_far[1] = (half_size[1] - local_origin_rotated_y) / local_dir_y
+
+        # 交换 t_near 和 t_far 保证 t_near < t_far
+        if t_near[0] > t_far[0]: t_near[0], t_far[0] = t_far[0], t_near[0]
+        if t_near[1] > t_far[1]: t_near[1], t_far[1] = t_far[1], t_near[1]
+
+        t_entry = max(t_near[0], t_near[1])
+        t_exit = min(t_far[0], t_far[1])
+
+        if t_entry < t_exit and t_exit > 1e-6:
+            final_t = t_entry
+            if final_t > 1e-6:
+                if final_t < distances[i]:
+                    distances[i] = np.float32(final_t)
+                    
+    return distances
+
+# 你也可以为 _ray_intersect_line 写一个类似的 _numba_ray_intersect_line 函数
+
+# ===================================================================
+# 2. 修改 Lidar 类，让它作为“调度器”，调用上面的纯计算函数
+# ===================================================================
 class Lidar:
     """
     一个用于2D环境的Lidar传感器。
-
-    该传感器可以从智能体的位置发射多条射线，并计算与环境中
-    圆形和矩形障碍物的交点距离。
+    它负责准备数据并调用Numba加速的函数进行计算。
     """
     def __init__(self, n_rays: int, max_range: float, fov: float = 2 * np.pi):
-        """
-        初始化Lidar传感器。
-
-        Args:
-            n_rays (int): 射线的数量。
-            max_range (float): 传感器的最大测量距离。
-            fov (float): 传感器的视场角范围 (Field of View)，默认为360度。
-        """
         self.n_rays = n_rays
-        self.max_range = max_range
-        self.relative_angles = np.linspace(-fov / 2, fov / 2, n_rays, endpoint=False)
+        self.max_range = float(max_range) # 确保是浮点数
+        self.relative_angles = np.linspace(-fov / 2, fov / 2, n_rays, endpoint=False).astype(np.float32)
 
     def scan(self, agent_pos: np.ndarray, agent_angle: float, obstacles: list) -> np.ndarray:
-        """
-        执行一次扫描，返回每条射线的测量距离。
-
-        Args:
-            agent_pos (np.ndarray): 智能体的当前位置 [x, y]。
-            agent_angle (float): 智能体的当前朝向角度 (弧度)，x轴正方向为0。
-            obstacles (list): 环境中所有障碍物 (Circle或Rectangle对象) 的列表。
-
-        Returns:
-            np.ndarray: 一个包含每条射线测量距离的一维数组。
-                        如果没有检测到障碍物，距离为max_range。
-        """
         distances = np.full(self.n_rays, self.max_range, dtype=np.float32)
-        world_angles = self.relative_angles + agent_angle
-        ray_directions = np.c_[np.cos(world_angles), np.sin(world_angles)]
+        world_angles = self.relative_angles + np.float32(agent_angle)
+        # 提前计算所有射线方向
+        ray_directions = np.c_[np.cos(world_angles), np.sin(world_angles)].astype(np.float32)
 
         for obstacle in obstacles:
+            obstacle_dists = np.full(self.n_rays, self.max_range, dtype=np.float32)
+            
+            # --- 这里是核心修改 ---
+            # 根据障碍物类型，提取出基础数据，然后调用对应的Numba函数
             if isinstance(obstacle, Circle):
-                obstacle_dists = self._ray_intersect_circle(agent_pos, ray_directions, obstacle)
+                obstacle_dists = _numba_ray_intersect_circle(
+                    agent_pos.astype(np.float32), ray_directions, 
+                    obstacle.center.astype(np.float32), np.float32(obstacle.radius), 
+                    self.n_rays, np.float32(self.max_range)
+                )
             elif isinstance(obstacle, Rectangle):
-                obstacle_dists = self._ray_intersect_rectangle(agent_pos, ray_directions, obstacle)
-            elif isinstance(obstacle, Line):
-                obstacle_dists = self._ray_intersect_line(agent_pos, ray_directions, obstacle)
+                obstacle_dists = _numba_ray_intersect_rectangle(
+                    agent_pos.astype(np.float32), ray_directions,
+                    obstacle.center.astype(np.float32), obstacle.size.astype(np.float32), np.float32(obstacle.angle),
+                    self.n_rays, np.float32(self.max_range)
+                )
+            # elif isinstance(obstacle, Line):
+            #     # 调用 _numba_ray_intersect_line
+            #     ...
             else:
                 continue
+            # --- 修改结束 ---
 
-            distances = np.minimum(distances, obstacle_dists)
+            distances = np.minimum(distances, obstacle_dists.astype(np.float32))
 
-        return distances
-
-    def _ray_intersect_circle(self, ray_origin: np.ndarray, ray_directions: np.ndarray, circle: Circle) -> np.ndarray:
-        """矢量化计算所有射线与单个圆形障碍物的交点距离。"""
-        L = ray_origin - circle.center
-        b = 2 * np.einsum('ij,j->i', ray_directions, L)
-        c = np.dot(L, L) - circle.radius**2
-        delta = b**2 - 4 * c
-
-        distances = np.full(self.n_rays, self.max_range)
-        mask = delta >= 0
-        if not np.any(mask):
-            return distances
-
-        sqrt_delta = np.sqrt(delta[mask])
-        t1 = (-b[mask] - sqrt_delta) / 2.0
-        t2 = (-b[mask] + sqrt_delta) / 2.0
-        t = np.where(t1 > 0, t1, t2)
-
-        valid_t = t[t > 0]
-        valid_mask_indices = np.where(mask)[0][t > 0]
-
-        distances[valid_mask_indices] = np.minimum(valid_t, self.max_range)
-
-        return distances
-
-    def _ray_intersect_rectangle(self, ray_origin: np.ndarray, ray_directions: np.ndarray, rect: Rectangle) -> np.ndarray:
-        """矢量化计算所有射线与单个旋转矩形的交点距离 (Slab方法)。"""
-        # 1. 坐标系变换：将射线原点和方向变换到矩形的局部坐标系中
-        local_origin = ray_origin - rect.center
-
-        # 我们需要将世界坐标系旋转 -rect.angle 度，以对齐矩形。
-        angle_to_rotate = -rect.angle
-        cos_a = np.cos(angle_to_rotate)
-        sin_a = np.sin(angle_to_rotate)
-
-        # CORRECTED: 这是用于旋转行向量 [x, y] 的正确矩阵
-        # [x', y'] = [x, y] @ [[cos, sin], [-sin, cos]]
-        rotation_matrix = np.array([[cos_a, sin_a],
-                                    [-sin_a, cos_a]])
-
-        # 将射线的原点和方向都应用相同的旋转
-        local_origin_rotated = local_origin @ rotation_matrix
-        local_directions = ray_directions @ rotation_matrix
-
-        # 2. Slab Test: 计算射线与轴对齐包围盒(AABB)的交点
-        half_size = rect.size / 2.0
-        inv_directions = np.divide(1.0, local_directions, where=local_directions!=0, out=np.full_like(local_directions, np.inf))
-
-        with np.errstate(divide='ignore', invalid='ignore'):
-            inv_directions = np.divide(1.0, local_directions, where=local_directions!=0, out=np.full_like(local_directions, np.inf))
-            t_near = ((-half_size) - local_origin_rotated) * inv_directions
-            t_far = (half_size - local_origin_rotated) * inv_directions
-
-        t_min = np.minimum(t_near, t_far)
-        t_max = np.maximum(t_near, t_far)
-
-        t_entry = np.nanmax(t_min, axis=1)
-        t_exit = np.nanmin(t_max, axis=1)
-
-        # 3. 确定有效交点
-        distances = np.full(self.n_rays, self.max_range)
-        mask = (t_entry < t_exit) & (t_exit > 0)
-
-        final_t = t_entry[mask]
-        valid_t = final_t[final_t > 0]
-        valid_mask_indices = np.where(mask)[0][final_t > 0]
-
-        distances[valid_mask_indices] = np.minimum(valid_t, self.max_range)
-
-        return distances
-
-    def _ray_intersect_line(self, ray_origin: np.ndarray, ray_directions: np.ndarray, line: Line) -> np.ndarray:
-        """矢量化计算所有射线与单个线段的交点距离。"""
-        # 射线: P = ray_origin + t * ray_directions
-        # 线段: Q = line.p1 + u * v_line,  其中 v_line = line.p2 - line.p1
-        # 求解 P = Q, 得到 t 和 u
-
-        v_line = line.p2 - line.p1
-        origin_diff = line.p1 - ray_origin
-
-        # 使用2D向量叉乘来求解
-        # denominator = ray_directions x v_line
-        denominator = np.cross(ray_directions, v_line)
-
-        # t = (origin_diff x v_line) / denominator
-        t_numerator = np.cross(origin_diff, v_line)
-
-        # u = (origin_diff x ray_directions) / denominator
-        u_numerator = np.cross(origin_diff, ray_directions)
-
-        # 初始化所有距离为最大值
-        distances = np.full(self.n_rays, self.max_range)
-
-        # 避免除以零 (射线与线段平行)
-        parallel_mask = np.abs(denominator) < 1e-6
-
-        # 计算 t 和 u, 对于平行情况设置为无效值
-        t = np.divide(t_numerator, denominator, where=~parallel_mask, out=np.full(self.n_rays, -1.0))
-        u = np.divide(u_numerator, denominator, where=~parallel_mask, out=np.full(self.n_rays, -1.0))
-
-        # 寻找有效交点: t > 0 (前方) 且 0 <= u <= 1 (在线段上)
-        valid_mask = (t > 1e-6) & (u >= 0) & (u <= 1)
-
-        distances[valid_mask] = np.minimum(t[valid_mask], self.max_range)
-
-        return distances
+        return distances.astype(np.float32)
