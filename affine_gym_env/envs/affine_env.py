@@ -17,7 +17,6 @@ except ImportError : # 测试时用
     from affine_utils.obstacles import Circle, Rectangle, Line
     from affine_utils.arg import MapArg, AgentArg, RewardArg
 
-
 class AffineEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
     def __init__(self, render_mode=None, seed=MapArg.SEED):
@@ -107,8 +106,8 @@ class AffineEnv(gym.Env):
                 seed=seed)
 
             self.observation_space = spaces.Dict({
-                "dist_to_goal": spaces.Box(low=np.float32(0.0), high=np.float32(np.sqrt((self.max_x - self.min_x)**2 + (self.max_y - self.min_y)**2)), shape=(1,), dtype=np.float32),
-                "leader1_vel": spaces.Box(low=np.float32(-AgentArg.MAX_VEL), high=np.float32(AgentArg.MAX_VEL), shape=(2,), dtype=np.float32), 
+                # "dist_to_goal": spaces.Box(low=np.float32(0.0), high=np.float32(np.sqrt((self.max_x - self.min_x)**2 + (self.max_y - self.min_y)**2)), shape=(1,), dtype=np.float32),
+                # "leader1_vel": spaces.Box(low=np.float32(-AgentArg.MAX_VEL), high=np.float32(AgentArg.MAX_VEL), shape=(2,), dtype=np.float32), 
                 "other_rel_pos": spaces.Box(low=np.float32(0.0), high=np.float32(20.0), shape=(self.num_agents-1, 2), dtype=np.float32),
                 "other_rel_vel": spaces.Box(low=np.float32(AgentArg.MIN_VEL), high=np.float32(AgentArg.MAX_VEL), shape=(self.num_agents-1, 2), dtype=np.float32),
                 "agents_meas": spaces.Box(low=np.float32(0.0), high=np.float32(self.lidar_max_range), shape=(self.num_agents, self.lidar_num_rays), dtype=np.float32),
@@ -144,8 +143,8 @@ class AffineEnv(gym.Env):
             meas.append(dist.astype(np.float32))
 
         return {
-            "dist_to_goal": np.linalg.norm(self.agent_pos[0] - self.goal_pos).reshape(1,).astype(np.float32),
-            "leader1_vel": self.agent_vel[0].astype(np.float32),
+            # "dist_to_goal": np.linalg.norm(self.agent_pos[0] - self.goal_pos).reshape(1,).astype(np.float32),
+            # "leader1_vel": self.agent_vel[0].astype(np.float32),
             "other_rel_pos": (self.agent_pos[1:] - self.agent_pos[0]).astype(np.float32),
             "other_rel_vel": (self.agent_vel[1:] - self.agent_vel[0]).astype(np.float32),
             "agents_meas": np.array(meas, dtype=np.float32),
@@ -160,9 +159,7 @@ class AffineEnv(gym.Env):
         self.fail = False
         self.collide_count = 0
         self.crash = False
-        self.reward_info = {'tot_rew':0.0, 'rew_togoal':0.0, 'rew_goal':0.0, 'rew_move':0.0, 'rew_dir':0.0,
-                            'pen_collide':0.0, 'pen_danger':0.0,
-                            'pen_time':0.0, 'pen_overspeed':0.0,'pen_slow':0.0, 'pen_jerk':0.0}
+        self.reward_info = {}
         self.agent_pos = self.agent_spawn.copy().astype(np.float32)
         self.agent_acc = np.zeros((self.num_agents, 2), dtype=np.float32)
         self.agent_vel = np.zeros((self.num_agents, 2), dtype=np.float32)
@@ -212,7 +209,7 @@ class AffineEnv(gym.Env):
         self.agent_pos[0] += self.agent_vel[0] * self.dt
         
         # 计算仿射变换目标位置
-        self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, np.zeros(2), scale, shear) + self.agent_pos[0]
+        self.target_pos = self.apply_affine_transform(AgentArg.NOMINAL_CONFIG, rot, np.zeros(2, dtype=np.float32), scale, shear) + self.agent_pos[0]
 
         # 更新领导者2,3的状态
         self.agent_acc[1:self.num_leaders] = AgentArg.KP_LEADER * (self.target_pos[1:self.num_leaders] - self.agent_pos[1:self.num_leaders]) + \
@@ -263,85 +260,66 @@ class AffineEnv(gym.Env):
         info = self._get_info()
         return obs, rew, done, False, info
 
+    # 在 affine_env.py 的 AffineEnv 类中
+
     def reward(self, obs):
-        total_reward = 0
-        rew_goal = 0.0
-        pen_slow = 0.0
-        self.danger_count = 0
-        self.collide_rays = 0
         done = False
-        agents_meas = obs["agents_meas"]
-        #TODO 设计要考虑到奖励的期望而不是单步奖励的大小
-        
-        #* 完成任务奖励 rew_togoal, rew_goal
-        dist_to_goal = np.linalg.norm(self.agent_pos[0] - self.goal_pos)
-        rew_togoal = RewardArg.R_TOGOAL / dist_to_goal
-        if dist_to_goal < 2 * self.goal_radius:
+        all_lidar = obs["agents_meas"]
+
+        total_reward = 0.0
+        rew_goal = 0.0
+        rew_near = 0.0
+        rew_move = 0.0
+        pen_crash = 0.0
+        pen_avoid = 0.0
+
+        # 计算到达目标的奖励
+        leader_center = sum(self.agent_pos[:3]) / 3
+        # dist_to_goal = obs["dist_to_goal"]
+        dist_to_goal = np.linalg.norm(leader_center - self.goal_pos)
+        if dist_to_goal < self.goal_radius:
             rew_goal = RewardArg.R_GOAL
-            self.finish = True
-            done = True
+            return rew_goal, True
 
-        #* 移动和朝向奖励 rew_move, rew_dir
-        move_length = np.linalg.norm(self.old_pos[0] - self.goal_pos) - dist_to_goal
-        goal_dir = self.goal_pos - self.old_pos[0]
-        move_dir = self.agent_pos[0] - self.old_pos[0]
+        # 计算移动奖励
+        rew_near = RewardArg.R_NEAR * np.tanh(1/dist_to_goal)
+        # rew_near = rew_near[0]
+        old_dist_to_goal = np.linalg.norm(self.old_pos[0] - self.goal_pos)
+        rew_move = RewardArg.R_MOVE * (old_dist_to_goal - dist_to_goal)
+        # rew_move = rew_move[0]
 
-        rew_dir = RewardArg.R_DIR * np.dot(goal_dir, move_dir) / (np.linalg.norm(goal_dir) + 1e-6)
-        rew_move = RewardArg.R_MOVE * move_length
-        
-        #* 滞留惩罚 pen_slow
-        leader1_speed = np.linalg.norm(self.agent_vel[0])
-        if np.abs(leader1_speed) < 0.1*AgentArg.MAX_VEL and move_length < 0.5*self.agent_radius:
-            pen_slow = RewardArg.P_SLOW
-
-        #* 任务时间惩罚 pen_time
-        pen_time = RewardArg.P_TIME
-
-        #* 危险惩罚 pen_danger, pen_collide
+        # 计算碰撞惩罚
         for i in range(self.num_agents):
-            meas = agents_meas[i]
-            # 危险区域：Lidar 探测到的距离小于一个阈值（例如，2倍智能体半径）
-            self.danger_count += np.sum(meas[:self.num_obstacles] <= (self.agent_radius * 8)) \
-                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 2.5))
-            # 碰撞：Lidar 探测到的距离小于或等于智能体半径
-            self.collide_rays += np.sum(meas[:self.num_obstacles] <= self.agent_radius * 5) \
-                                +np.sum(meas[self.num_obstacles:] < (self.agent_radius * 1.5))
-            self.crash += np.any(meas<=0.5*self.agent_radius)
+            num_static_obstacles = len(self.static_obstacles)
+            min_dist_to_obstacles = np.min(all_lidar[i][:num_static_obstacles])
+            min_dist_to_agents = np.min(all_lidar[i][num_static_obstacles:])
 
-        if self.collide_rays > 1:
-            self.collide_count += 1
-
-        pen_danger = RewardArg.P_DANGER * self.danger_count
-        pen_collide = RewardArg.P_COLLIDE * self.collide_rays
-
-        if self.collide_count >= RewardArg.TOL_COLLIDE_TIMES or self.crash:
-            pen_collide += RewardArg.P_FAIL
-            self.fail = True
-            done = True
-
-        #* 超速惩罚 pen_overspeed
-        # 调整 AgentArg.LIDAR_MAX_RANGE 后面的系数来改变映射的陡峭程度
-        pen_overspeed = 0.0
-        min_dist_to_obstacle = np.min(agents_meas[0])
-        safe_speed = AgentArg.MAX_VEL * (min_dist_to_obstacle / (AgentArg.LIDAR_MAX_RANGE * 0.8))
-        safe_speed = np.clip(safe_speed, 0, AgentArg.MAX_VEL) # 确保安全速度在合理范围内
-        current_speed = np.linalg.norm(self.agent_vel[0])
-        # 如果当前速度超过了安全速度，则给予惩罚
-        if current_speed > safe_speed:
-            # 惩罚大小与超速的程度成正比
-            speed_diff = current_speed - safe_speed
-            pen_overspeed = RewardArg.P_OVERSPEED * speed_diff 
-
-        #* 平滑度惩罚 pen_jerk
-        pen_jerk = RewardArg.P_JERK * (self.current_jerk**2)
-
-        total_reward = rew_togoal + rew_goal + rew_move + rew_dir \
-                        +pen_collide + pen_danger + pen_time + pen_overspeed + pen_slow
+            if min_dist_to_obstacles < AgentArg.DANGER_THRESHOLD:
+                if i == 0:
+                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1/ min_dist_to_obstacles - 1 / AgentArg.DANGER_THRESHOLD) ** 2
+                else:
+                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist_to_obstacles - 1 / AgentArg.DANGER_THRESHOLD) ** 2 / (self.num_agents - 1)
+            
+            if min_dist_to_agents < 0.5*AgentArg.DANGER_THRESHOLD:
+                if i == 0:
+                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist_to_agents - 1 / AgentArg.DANGER_THRESHOLD) ** 2
+                else:
+                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist_to_agents - 1 / AgentArg.DANGER_THRESHOLD) ** 2 / (self.num_agents - 1)
+            
+            if min_dist_to_obstacles < AgentArg.COLLISION_THRESHOLD or min_dist_to_agents < 0.5*AgentArg.COLLISION_THRESHOLD:
+                pen_crash = RewardArg.P_CRASH
+                done = True
         
-        self.reward_info = {'tot_rew':total_reward, 
-                            'rew_togoal':rew_togoal, 'rew_goal':rew_goal, 'rew_move':rew_move, 'rew_dir':rew_dir,
-                            'pen_collide':pen_collide, 'pen_danger':pen_danger,'pen_time':pen_time, 'pen_overspeed':pen_overspeed,
-                            'pen_slow':pen_slow, 'pen_jerk':pen_jerk,}        
+        total_reward = np.float32(rew_goal + rew_move + rew_near + pen_crash + pen_avoid)
+
+        self.reward_info = {
+            "total_reward": total_reward,
+            "rew_goal": rew_goal,
+            "rew_near": rew_near,
+            "rew_move": rew_move,
+            "pen_crash": pen_crash,
+            "pen_avoid": pen_avoid,
+        }
         return total_reward, done
 
     def _init_render(self):
@@ -359,7 +337,7 @@ class AffineEnv(gym.Env):
         if self.font is None:
             pygame.font.init() # 确保字体模块已初始化
             self.font = pygame.font.SysFont("Arial", 18) # 使用常见的字体和大小
-
+            
     def render(self):
         if self.screen is None and (self.render_mode == "human" or self.render_mode == "rgb_array"):
             self._init_render()
@@ -431,9 +409,12 @@ class AffineEnv(gym.Env):
         # --- 绘制期望队形 ---
         if hasattr(self, 'target_pos') and self.target_pos is not None:
             agent_radius_screen = int(self.agent_radius * self.scale_factor)
-            for i in range(self.num_leaders-1):
+            for i in range(self.num_agents-1):
                 target_pos_screen = world_to_screen(self.target_pos[i+1])
-                pygame.draw.circle(canvas, self.COLORS["TARGET_FORMATION"][i-1], target_pos_screen, agent_radius_screen, 2)
+                if i<self.num_leaders-1:
+                    pygame.draw.circle(canvas, self.COLORS["TARGET_FORMATION"][0], target_pos_screen, agent_radius_screen, 2)
+                else:
+                    pygame.draw.circle(canvas, self.COLORS["TARGET_FORMATION"][1], target_pos_screen, agent_radius_screen, 2)
 
         # --- 绘制实际领导者 ---
         agent_radius_screen = int(self.agent_radius * self.scale_factor)
@@ -479,38 +460,29 @@ class AffineEnv(gym.Env):
                 f"Shear: [{shear[0]:.2f}, {shear[1]:.2f}]"
             ]
 
-            rew_texts = [
-                f"tot_rew: {self.reward_info['tot_rew']:.3f}",
-                f"rew_togoal: {self.reward_info['rew_togoal']:.3f}",
-                f"rew_goal: {self.reward_info['rew_goal']:.3f}",
-                f"rew_move: {self.reward_info['rew_move']:.3f}",
-                f"rew_dir: {self.reward_info['rew_dir']:.3f}",
+            # 动态生成奖励和惩罚文本，自动适应 reward_info 的内容
+            reward_keys = [k for k in self.reward_info if k.startswith("rew_") or k.startswith("tot_")]
+            penalty_keys = [k for k in self.reward_info if k.startswith("pen_")]
 
-            ]
-            pen_texts = [
-                f"pen_collide: {self.reward_info['pen_collide']:.3f}",
-                f"pen_danger: {self.reward_info['pen_danger']:.3f}",
-                f"pen_time: {self.reward_info['pen_time']:.3f}",
-                f"pen_overspeed: {self.reward_info['pen_overspeed']:.3f}",
-                f"pen_slow: {self.reward_info['pen_slow']:.3f}",
-                f"pen_jerk: {self.reward_info['pen_jerk']:.3f}",
-            ]            
+            rew_texts = [f"{k}: {self.reward_info[k]:.3f}" for k in reward_keys]
+            pen_texts = [f"{k}: {self.reward_info[k]:.3f}" for k in penalty_keys]
+
             # 逐行渲染并绘制到画布上
             y_offset = 10
             for text in info_texts:
                 text_surface = self.font.render(text, True, self.COLORS["HUD_TEXT"])
                 canvas.blit(text_surface, (10, y_offset))
-                y_offset += 22 # 为下一行文本增加Y轴偏移
+                y_offset += 22
             y_offset = 10
             for text in rew_texts:
                 text_surface = self.font.render(text, True, self.COLORS["HUD_TEXT"])
                 canvas.blit(text_surface, (200, y_offset))
-                y_offset += 22 # 为下一行文本增加Y轴偏移
+                y_offset += 22
             y_offset = 10
             for text in pen_texts:
                 text_surface = self.font.render(text, True, self.COLORS["HUD_TEXT"])
                 canvas.blit(text_surface, (400, y_offset))
-                y_offset += 22 # 为下一行文本增加Y轴偏移
+                y_offset += 22
 
         if self.render_mode == "human":
             pygame.event.pump()

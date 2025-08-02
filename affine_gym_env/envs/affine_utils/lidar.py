@@ -1,14 +1,14 @@
 import numpy as np
 import numba
 # 确保你的 obstacles.py 也在同一个文件夹
-from .obstacles import Circle, Rectangle, Line 
+from affine_gym_env.envs.affine_utils.obstacles import Circle, Rectangle, Line 
 
 # ===================================================================
 # 1. 创建独立的、可被Numba编译的 "纯计算" 函数
 #    这些函数不属于任何类，并且只接收基础数据类型。
 # ===================================================================
 
-@numba.jit(nopython=True, cache=True)
+@numba.jit(nopython=True, cache=True, fastmath=True)
 def _numba_ray_intersect_circle(ray_origin, ray_directions, circle_center, circle_radius, n_rays, max_range):
     """计算所有射线与单个圆形障碍物的交点距离 (Numba加速版)"""
     distances = np.full(n_rays, max_range, dtype=np.float32)
@@ -37,7 +37,7 @@ def _numba_ray_intersect_circle(ray_origin, ray_directions, circle_center, circl
                         
     return distances
 
-@numba.jit(nopython=True, cache=True)
+@numba.jit(nopython=True, cache=True, fastmath=True)
 def _numba_ray_intersect_rectangle(ray_origin, ray_directions, rect_center, rect_size, rect_angle, n_rays, max_range):
     """计算所有射线与单个旋转矩形的交点距离 (Numba加速版)"""
     distances = np.full(n_rays, max_range, dtype=np.float32)
