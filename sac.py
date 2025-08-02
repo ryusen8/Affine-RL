@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import random
-import os
+import os 
 from datetime import datetime
 from tqdm import tqdm
 from my_wrappers import FlattenDictAction, FlattenDictObservation
@@ -18,6 +18,7 @@ import imageio
 from torch.amp import GradScaler, autocast
 import cProfile
 import pstats
+import shutil
 
 # --- 0. 参数配置类 ---
 class SACConfig:
@@ -29,9 +30,10 @@ class SACConfig:
         self.save_results = True # 是否保存训练结果 (模型和奖励曲线)
 
         # SAC 算法超参数
-        self.actor_lr = TrainArg.ACTOR_LR
-        self.critic_lr = TrainArg.CRITIC_LR
-        self.alpha_lr = TrainArg.ALPHA_LR # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
+        self.lr = TrainArg.LR
+        self.actor_lr = self.lr
+        self.critic_lr = self.lr
+        self.alpha_lr = self.lr # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
         self.gamma = TrainArg.GAMMA # 折扣因子
         self.tau = TrainArg.TAU # 软更新因子
         self.alpha = TrainArg.ALPHA_INIT # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
@@ -72,26 +74,28 @@ class Actor(nn.Module):
         self.net_state = nn.Sequential(
             nn.Linear(state_dim, hidden_size),
             nn.LayerNorm(hidden_size), # 在激活函数前进行归一化
-            # nn.ReLU(),
-            nn.Hardswish(),
+            nn.ReLU(),
+            # nn.Hardswish(),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
-            # nn.ReLU()
-            nn.Hardswish(),
+            nn.ReLU()
+            # nn.Hardswish(),
         )
         
         # 2. 计算动作均值(mean)的“头”网络
         #    使用 Hardswish 增加非线性表达能力。
         self.net_mean = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.Hardswish(),
+            # nn.Hardswish(),
+            nn.ReLU(),
             nn.Linear(hidden_size // 2, action_dim)
         )
         
         # 3. 计算动作对数标准差(log_std)的“头”网络
         self.net_log_std = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.Hardswish(),
+            # nn.Hardswish(),
+            nn.ReLU(),
             nn.Linear(hidden_size // 2, action_dim)
         )
 
@@ -156,11 +160,12 @@ class Critic(nn.Module):
         self.net_q1 = nn.Sequential(
             nn.Linear(state_dim + action_dim, hidden_size),
             nn.LayerNorm(hidden_size),
-            # nn.ReLU(),
-            nn.Hardswish(),
+            nn.ReLU(),
+            # nn.Hardswish(),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.Hardswish(), # 在最后一层前使用 Hardswish
+            nn.ReLU(),
+            # nn.Hardswish(), # 在最后一层前使用 Hardswish
             nn.Linear(hidden_size, 1)
         )
 
@@ -169,11 +174,12 @@ class Critic(nn.Module):
         self.net_q2 = nn.Sequential(
             nn.Linear(state_dim + action_dim, hidden_size),
             nn.LayerNorm(hidden_size),
-            # nn.ReLU(),
-            nn.Hardswish(),
+            nn.ReLU(),
+            # nn.Hardswish(),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.Hardswish(),
+            nn.ReLU(),
+            # nn.Hardswish(),
             nn.Linear(hidden_size, 1)
         )
 
@@ -304,11 +310,12 @@ class SAC:
         # 在转换为 NumPy 数组之前分离梯度
         return (action * self.action_scale + self.action_bias).squeeze(0).detach().cpu().numpy()
 
-    def update(self):
-        if len(self.replay_buffer) < self.batch_size:
-            return
+    def update(self, batch_size):
+        # if len(self.replay_buffer) < self.batch_size:
+        #     return
 
-        state_batch, action_batch, reward_batch, next_state_batch, done_batch = self.replay_buffer.sample(self.batch_size)
+        # state_batch, action_batch, reward_batch, next_state_batch, done_batch = self.replay_buffer.sample(self.batch_size)
+        state_batch, action_batch, reward_batch, next_state_batch, done_batch = self.replay_buffer.sample(batch_size)
 
         # --- Critic Loss ---
         with autocast(device_type='cuda'):
@@ -362,7 +369,7 @@ def test_and_save_gif(agent, config, episode, save_path):
     frames = []
     test_env = gym.make(config.env_name, render_mode="rgb_array")
     test_env = FlattenDictObservation(test_env)
-    test_env = NormalizeObservation(test_env) 
+    # test_env = NormalizeObservation(test_env) 
     test_env = FlattenDictAction(test_env)
     try:
         state, _ = test_env.reset()
@@ -401,9 +408,13 @@ def test_and_save_gif(agent, config, episode, save_path):
 # --- 4. 训练函数 ---
 def train_sac(config: SACConfig):
 
+    basic_batch_size = TrainArg.BATCH_SIZE
+    basic_update_times = 1
+    replay_max_capacity = TrainArg.BUFFER_SIZE
+
     env = gym.make(config.env_name, render_mode="rgb_array")
     env = FlattenDictObservation(env)
-    env = NormalizeObservation(env) 
+    # env = NormalizeObservation(env) 
     env = FlattenDictAction(env)
 
     state_dim = env.observation_space.shape[0]
@@ -426,41 +437,61 @@ def train_sac(config: SACConfig):
     folder_name = f"AffineEnv_SAC_{run_timestamp}"
     save_dir = os.path.join("test_model", folder_name)
     os.makedirs(save_dir, exist_ok=True)
-
+    shutil.copyfile("D:\\Main Code\\Python\\affine_rl\\affine_gym_env\\envs\\affine_utils\\arg.py", os.path.join(save_dir, "arg.py")) # 复制参数文件到保存目录
     run_gif_dir = os.path.join(save_dir, f"train_preview")
     os.makedirs(run_gif_dir, exist_ok=True)
 
     # --- 新增: 初始随机探索 ---
-    # initial_explore_steps = config.batch_size * 10 # 比如收集10个batch的随机数据
-    # print(f"Collecting initial random samples for {initial_explore_steps} steps...")
-    # state, _ = env.reset()
-    # for _ in range(initial_explore_steps):
-    #     random_action = env.action_space.sample() # 使用环境的随机采样
-    #     next_state, reward, terminated, truncated, info = env.step(random_action)
-    #     done = terminated or truncated
-    #     scaled_reward = reward * config.reward_scale
-    #     agent.replay_buffer.push(state, random_action, scaled_reward, next_state, done)
-    #     if done:
-    #         state, _ = env.reset()
-    #     else:
-    #         state = next_state
-    # print("Initial random sampling complete.")
+    initial_explore_steps = config.batch_size * 10 # 比如收集10个batch的随机数据
+    print(f"Collecting initial random samples for {initial_explore_steps} steps...")
+    state, _ = env.reset()
+    for _ in range(initial_explore_steps):
+        random_action = env.action_space.sample() # 使用环境的随机采样
+        next_state, reward, terminated, truncated, info = env.step(random_action)
+        done = terminated or truncated
+        scaled_reward = reward * config.reward_scale
+        agent.replay_buffer.push(state, random_action, scaled_reward, next_state, done)
+        if done:
+            state, _ = env.reset()
+        else:
+            state = next_state
+    print("Initial random sampling complete.")
 
-    desc = f"{config.env_name} w/ SAC"
-    gradient_steps_per_step = 100
+    # desc = f"{config.env_name} w/ SAC"
+    # gradient_steps_per_step = 100
     with tqdm(total=config.num_episodes, desc=None) as pbar:
         for episode in range(config.num_episodes):
             state, _ = env.reset()
             episode_steps = 0
             episode_reward = 0
             for step in range(config.max_steps_per_episode):
+                # 动态计算 k, batch_size, update_times
+                replay_len = len(agent.replay_buffer)
+                k = 1.0 + replay_len / replay_max_capacity
+                current_batch_size = int(k * basic_batch_size)
+                # 确保batch_size至少为1，避免为0
+                current_batch_size = max(current_batch_size, 1)
+                lr = TrainArg.LR * (current_batch_size / config.batch_size) # 动态调整学习率 
+                agent.actor_optimizer.param_groups[0]['lr'] = lr
+                agent.critic_optimizer.param_groups[0]['lr'] = lr
+                agent.alpha_optimizer.param_groups[0]['lr'] = lr
+                update_times = int(k * basic_update_times)
+                # 确保至少更新1次
+                update_times = max(update_times, 1)      
+                
                 action = agent.select_action(state)
 
                 next_state, reward, terminated, truncated, info = env.step(action)
                 scaled_reward = reward * config.reward_scale
                 done = terminated or truncated
                 agent.replay_buffer.push(state, action, scaled_reward, next_state, done)
-                agent.update()
+
+                # agent.update()
+                # 只有当缓冲区数据足够进行一次采样时才开始更新
+                if replay_len > current_batch_size:
+                    for _ in range(update_times):
+                        # 在调用 agent.update 时需要传递当前的 batch_size
+                        agent.update(current_batch_size)
 
                 state = next_state
                 # episode_reward += reward
@@ -477,7 +508,9 @@ def train_sac(config: SACConfig):
             pbar.set_postfix({
                 'rew': f'{episode_reward:.2f}', 
                 'avg_rew': f'{np.mean(episode_rewards[-config.log_interval:]):.2f}' if len(episode_rewards) >= config.log_interval else 'N/A',
-                'stp_used': episode_steps,
+                'stp': episode_steps,
+                # 'bs': current_batch_size,
+                # 'lr': f'{config.lr:.1e}',
             })
             pbar.update(1) # 更新进度条1步
             # <--- 新增: 定期测试并保存 GIF ---
@@ -515,7 +548,7 @@ def train_sac(config: SACConfig):
 
 # --- 5. 绘制奖励曲线 ---
 # 增加一个 save_path 参数来保存图片，并增加 smoothing_window 参数
-def plot_rewards(rewards, env_name, smoothing_window=1, save_path=None):
+def plot_rewards(rewards, env_name, smoothing_window=1, save_path=None): 
     plt.figure(figsize=(12, 7)) # 稍微大一点的图
     plt.plot(rewards, label='Raw Rewards', alpha=0.6, color='blue') # 原始奖励曲线
 
@@ -543,7 +576,7 @@ def test_model(config: SACConfig, model_path_override=None):
     env = gym.make(config.env_name, render_mode="rgb_array")
 
     env = FlattenDictObservation(env)
-    env = NormalizeObservation(env) 
+    # env = NormalizeObservation(env) 
     env = FlattenDictAction(env)
 
     state_dim = env.observation_space.shape[0]
@@ -630,9 +663,9 @@ if __name__ == "__main__":
     # 实例化配置类
     config = SACConfig(env_name=TrainArg.ENV_NAME)
 
-    # print(f"Starting training for {config.env_name} with configuration:")
-    # for attr, value in vars(config).items():
-    #     print(f"  {attr}: {value}")
+    print(f"Starting training for {config.env_name} with configuration:")
+    for attr, value in vars(config).items():
+        print(f"  {attr}: {value}")
 
     # 训练 SAC 算法
     # train_sac 现在会返回保存的模型路径

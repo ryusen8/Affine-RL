@@ -31,7 +31,7 @@ class MapArg:
             "FIRST_TRAIL": (255, 150, 150),
             "LEADER_TRAIL": (150, 150, 255),
             "FOLLOWER_TRAIL": (150, 255, 150),
-            "TARGET_FORMATION": ((150, 150, 255),(150, 150, 255),(150, 255, 150)),
+            "TARGET_FORMATION": ((150, 150, 255),(150, 255, 150)),
 
             "LIDAR_RAY": (200, 200, 200),
             "COMM_LINE": (135, 70, 205),           
@@ -55,9 +55,9 @@ class AgentArg:
     SPAWN_OFFSET = np.array([50.0, 0.0], dtype=np.float32)
     AGENT_SPAWN = NOMINAL_CONFIG + SPAWN_OFFSET
 
-    LIDAR_NUM_RAYS = 12
-    LIDAR_MAX_RANGE = 25
-    LIDAR_FOV = 1.5*np.pi
+    LIDAR_NUM_RAYS = 16
+    LIDAR_MAX_RANGE = 30
+    LIDAR_FOV = 2*np.pi
 
     MAX_VEL = 15.0
     MIN_VEL = -15.0
@@ -68,13 +68,16 @@ class AgentArg:
     # 仿射变换参数
     MAX_ROT = np.pi
     MIN_ROT = -np.pi
-    MAX_SCALE = 2.0
-    MIN_SCALE = 0.4
+    MAX_SCALE = 1.5
+    MIN_SCALE = 0.5
     MAX_SHEAR = 1.5
     MIN_SHEAR = -1.5
 
+    COLLISION_THRESHOLD = AGENT_RADIUS * 4
+    DANGER_THRESHOLD = AGENT_RADIUS * 6
+
     # PD控制真实领导者位移
-    KP_LEADER = 0.2
+    KP_LEADER = 0.2 
     KD_LEADER = 0.1
 
     # 基于应力的控制律
@@ -99,42 +102,33 @@ class AgentArg:
     ]
 
 class RewardArg:
-    TOL_COLLIDE_TIMES = 6
+    R_GOAL = 200
+    R_MOVE = 0.08
+    R_NEAR = 200
 
-    R_TOGOAL = 160
-    R_GOAL = 800
-    R_MOVE = 10
-    R_DIR = 7
-
-    P_SLOW = -25
-    P_OVERSPEED = -3
-    P_FAIL = -300
-    P_DANGER = -2.4 #-2
-    P_COLLIDE = -30
-    P_FORM_ERROR = -0.3
-    P_TIME = 0.01
-    P_JERK = -0.05
+    P_CRASH = -200
+    P_AVOID = -50
 
 class TrainArg:
     ENV_NAME = "affine_gym_env/AffineEnv"
     SEED = None
-    NUM_EP = 80_00 # 训练的总回合数
-    EP_MAX_STEP = 400 # 每个回合的最大步数
+    NUM_EP = 60_00 # 训练的总回合数
+    EP_MAX_STEP = 350 # 每个回合的最大步数
     LOG_INTERVAL = 10 # 每隔多少个回合打印一次日志.
     GIF_INTERVAL = 500
     GIF_FPS = 30
-    NUM_TEST_EP = 2 # 测试回合数
+    NUM_TEST_EP = 5 # 测试回合数   
     SMOOTH = 15 # 奖励曲线平滑窗口大小
-    REWARD_SCALE = 2 ** -3
+    REWARD_SCALE = 2 ** -4
     # SAC 算法超参数
-    LR = 2e-4
+    LR = 3e-4
     ACTOR_LR = LR
     CRITIC_LR = LR
     ALPHA_LR = LR # 温度系数 alpha 的学习率,一般地，温度系数的学习率和网络参数的学习率保持一致
-    GAMMA = 0.98 # 折扣因子
+    GAMMA = 0.99 # 折扣因子
     TAU = 0.01 # 软更新因子
     ALPHA_INIT = 0.2 # 初始温度参数 (如果使用自动熵调整，此值会被覆盖)
-    BUFFER_SIZE = 500_000 # 经验回放缓冲区容量
+    BUFFER_SIZE = 10_0_0000 # 经验回放缓冲区容量
     BATCH_SIZE = 256 # 训练批次大小
     LOG_STD_MIN = -10.0
     LOG_STD_MAX = 1.0
