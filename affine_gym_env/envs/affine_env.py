@@ -7,27 +7,44 @@ import pygame
 import gymnasium as gym
 from gymnasium import spaces
 from collections import deque
+import random
 
 try: # 训练时用
     from .affine_utils.lidar import Lidar
     from .affine_utils.obstacles import Circle, Rectangle, Line
-    from .affine_utils.arg import MapArg, AgentArg, RewardArg
+    from .affine_utils.arg import MapArg, AgentArg, RewardArg, RandomMapArg
 except ImportError : # 测试时用
     from affine_utils.lidar import Lidar
     from affine_utils.obstacles import Circle, Rectangle, Line
-    from affine_utils.arg import MapArg, AgentArg, RewardArg
+    from affine_utils.arg import MapArg, AgentArg, RewardArg, RandomMapArg
 
 class AffineEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
-    def __init__(self, render_mode=None, seed=MapArg.SEED):
+    def __init__(self, render_mode=None, seed=MapArg.SEED, map_type='random'):
+        super().__init__()
+        self.map_type = map_type
+        # --- 根据 map_type 选择参数 ---
+        if self.map_type == 'random':
+            self.map_arg = RandomMapArg
+            AgentArg.AGENT_SPAWN = AgentArg.NOMINAL_CONFIG + self.map_arg.SPAWN_OFFSET
+        else: # static
+            self.map_arg = MapArg
+            # 静态地图的出生点
+            AgentArg.AGENT_SPAWN = AgentArg.NOMINAL_CONFIG + np.array([10.0 * MapArg.MAP_SCALE, 0.0], dtype=np.float32)
+
         self.dt = MapArg.DT
-        self.min_x = MapArg.MIN_X
-        self.max_x = MapArg.MAX_X # [0, 100]
-        self.min_y = MapArg.MIN_Y
-        self.max_y = MapArg.MAX_Y # [-10, 10]
+        self.min_x = self.map_arg.MIN_X
+        self.max_x = self.map_arg.MAX_X # [0, 100]
+        self.min_y = self.map_arg.MIN_Y
+        self.max_y = self.map_arg.MAX_Y # [-10, 10]
 
         self.screen_width = MapArg.SCREEN_WIDTH_PX
-        self.screen_height = MapArg.SCREEN_HEIGHT_PX
+        # self.screen_height = MapArg.SCREEN_HEIGHT_PX
+        if self.map_type == 'random':
+            # self.screen_height = int(MapArg.SCREEN_HEIGHT_PX * (self.map_arg.MAX_Y - self.map_arg.MIN_Y) / (MapArg.MAX_Y - MapArg.MIN_Y))
+            self.screen_height = RandomMapArg.SCREEN_HEIGHT_PX
+        else:
+            self.screen_height = MapArg.SCREEN_HEIGHT_PX
 
         self.padding_px = 20 # 屏幕边距
 
@@ -57,29 +74,30 @@ class AffineEnv(gym.Env):
         self.circle_pos = MapArg.CIRCLE_POS
         self.rectangle_size = MapArg.RECTANGLE_SIZE
         self.rectangle_pos = MapArg.RECTANGLE_POS
-        self.static_obstacles = list(np.array([
-            Rectangle(center=np.array(self.rectangle_pos[0], dtype=np.float32), size=np.array(self.rectangle_size, dtype=np.float32), angle=0.0),
-            Rectangle(center=np.array(self.rectangle_pos[1], dtype=np.float32), size=np.array(self.rectangle_size, dtype=np.float32), angle=0.0),
-            Circle(center=np.array(self.circle_pos[0], dtype=np.float32), radius=self.circle_radius),
-            Circle(center=np.array(self.circle_pos[1], dtype=np.float32), radius=self.circle_radius),
-            Rectangle(center=np.array([self.max_x/2, self.max_y+2.5], dtype=np.float32), # 上边界
-                        size=np.array([self.max_x, 5], dtype=np.float32), angle=0.0),
-            Rectangle(center=np.array([self.max_x/2, self.min_y-2.5], dtype=np.float32), # 下边界
-                        size=np.array([self.max_x, 5], dtype=np.float32), angle=0.0),
-            Rectangle(center=np.array([self.min_x-2.5, 0.0], dtype=np.float32), # 左边界
-                        size=np.array([5, self.max_y - self.min_y], dtype=np.float32), angle=0.0),
-            Rectangle(center=np.array([self.max_x+2.5, 0.0], dtype=np.float32), # 右边界
-                        size=np.array([5, self.max_y - self.min_y], dtype=np.float32), angle=0.0),         
-        ], dtype=object))
-        self.num_obstacles = 8
-        self.goal_radius = MapArg.GOAL_RADIUS
-        self.goal_pos = MapArg.GOAL_POS
+        self.static_obstacles = [] # 初始化为空列表
+        # self.static_obstacles = list(np.array([
+        #     Rectangle(center=np.array(self.rectangle_pos[0], dtype=np.float32), size=np.array(self.rectangle_size, dtype=np.float32), angle=0.0),
+        #     Rectangle(center=np.array(self.rectangle_pos[1], dtype=np.float32), size=np.array(self.rectangle_size, dtype=np.float32), angle=0.0),
+        #     Circle(center=np.array(self.circle_pos[0], dtype=np.float32), radius=self.circle_radius),
+        #     Circle(center=np.array(self.circle_pos[1], dtype=np.float32), radius=self.circle_radius),
+        #     Rectangle(center=np.array([self.max_x/2, self.max_y+2.5], dtype=np.float32), # 上边界
+        #                 size=np.array([self.max_x, 5], dtype=np.float32), angle=0.0),
+        #     Rectangle(center=np.array([self.max_x/2, self.min_y-2.5], dtype=np.float32), # 下边界
+        #                 size=np.array([self.max_x, 5], dtype=np.float32), angle=0.0),
+        #     Rectangle(center=np.array([self.min_x-2.5, 0.0], dtype=np.float32), # 左边界
+        #                 size=np.array([5, self.max_y - self.min_y], dtype=np.float32), angle=0.0),
+        #     Rectangle(center=np.array([self.max_x+2.5, 0.0], dtype=np.float32), # 右边界
+        #                 size=np.array([5, self.max_y - self.min_y], dtype=np.float32), angle=0.0),         
+        # ], dtype=object))
+        # self.num_obstacles = 8
+        self.goal_radius = self.map_arg.GOAL_RADIUS
+        self.goal_pos = self.map_arg.GOAL_POS
 
         self.num_agents = AgentArg.NUM_AGENTS
         self.num_leaders = AgentArg.NUM_LEADERS
         self.num_followers = AgentArg.NUM_FOLLOWERS
-        
-        self.agent_spawn = np.array(AgentArg.AGENT_SPAWN, dtype=np.float32)
+        # self.agent_spawn = np.array(AgentArg.AGENT_SPAWN, dtype=np.float32)
+        self.agent_spawn = AgentArg.AGENT_SPAWN.copy().astype(np.float32)
         self.agent_pos = self.agent_spawn.copy()
         self.agent_radius = AgentArg.AGENT_RADIUS
         # 为所有智能体创建Lidar的障碍物表示
@@ -130,6 +148,81 @@ class AffineEnv(gym.Env):
         self.trail_length = 100 # 轨迹点数
         # 为每个实际领导者创建一个独立的轨迹缓冲区
         self.agent_trails = [deque(maxlen=self.trail_length) for _ in range(self.num_agents)]
+        
+    def _generate_static_obstacles(self):
+        self.static_obstacles = list(np.array([
+            Rectangle(center=np.array(MapArg.RECTANGLE_POS[0], dtype=np.float32), size=np.array(MapArg.RECTANGLE_SIZE, dtype=np.float32), angle=0.0),
+            Rectangle(center=np.array(MapArg.RECTANGLE_POS[1], dtype=np.float32), size=np.array(MapArg.RECTANGLE_SIZE, dtype=np.float32), angle=0.0),
+            Circle(center=np.array(MapArg.CIRCLE_POS[0], dtype=np.float32), radius=MapArg.CIRCLE_RADIUS),
+            Circle(center=np.array(MapArg.CIRCLE_POS[1], dtype=np.float32), radius=MapArg.CIRCLE_RADIUS),
+        ], dtype=object))
+
+    def _generate_random_obstacles(self):
+        self.static_obstacles = []
+        block_size = self.map_arg.OBSTACLE_BLOCK_SIZE
+        
+        # 定义几种俄罗斯方块形状（相对于簇中心的局部坐标）
+        tetris_shapes = {
+            'I': [np.array([0, -1.5]), np.array([0, -0.5]), np.array([0, 0.5]), np.array([0, 1.5])],
+            'O': [np.array([-0.5, -0.5]), np.array([0.5, -0.5]), np.array([-0.5, 0.5]), np.array([0.5, 0.5])],
+            'T': [np.array([-1, 0]), np.array([0, 0]), np.array([1, 0]), np.array([0, -1])],
+            'L': [np.array([-1, -1]), np.array([-1, 0]), np.array([0, 0]), np.array([1, 0])],
+            'S': [np.array([-1, 0]), np.array([0, 0]), np.array([0, -1]), np.array([1, -1])],
+        }
+        
+        shape_keys = list(tetris_shapes.keys())
+        
+        # 在安全区域内生成障碍物簇
+        safe_margin_x = 2 * (self.goal_pos[0] - self.agent_spawn[0][0]) / 10
+        spawn_x_min = self.agent_spawn[:, 0].min() + safe_margin_x
+        spawn_x_max = self.goal_pos[0] - safe_margin_x
+        x_total_width = spawn_x_max - spawn_x_min
+        x_segment_length = x_total_width / self.map_arg.NUM_OBSTACLE_CLUSTERS    
+
+        for i in range(self.map_arg.NUM_OBSTACLE_CLUSTERS):
+            # 随机选择一个形状
+            shape_key = random.choice(shape_keys)
+            blocks = tetris_shapes[shape_key]
+            
+            # # 随机选择位置和角度
+            # center_x = random.uniform(spawn_x_min, spawn_x_max)
+            # center_y = random.uniform(self.min_y + block_size[1]*2, self.max_y - block_size[1]*2)
+            # 计算当前段的X轴范围
+            segment_start_x = spawn_x_min + i * x_segment_length
+            segment_end_x = segment_start_x + x_segment_length
+            
+            # 在该X段内随机选择一个X坐标
+            center_x = random.uniform(segment_start_x, segment_end_x)
+            
+            # Y坐标仍然在整个有效Y轴范围内随机选择
+            center_y = random.uniform(self.min_y + block_size[1]*2, self.max_y - block_size[1]*2)
+
+            cluster_center = np.array([center_x, center_y], dtype=np.float32)
+            angle = random.uniform(0, 2 * np.pi)
+            
+            rot_matrix = np.array([[np.cos(angle), -np.sin(angle)],
+                                    [np.sin(angle),  np.cos(angle)]])
+            
+            # 创建构成簇的矩形
+            for block_local_pos in blocks:
+                # 缩放并旋转局部位置
+                rotated_pos = (block_local_pos * block_size) @ rot_matrix.T
+                # 计算世界坐标
+                rect_center = cluster_center + rotated_pos
+                self.static_obstacles.append(
+                    Rectangle(center=rect_center, size=block_size, angle=angle)
+                )
+
+    # --- 新增：生成边界 ---
+    def _generate_boundaries(self):
+        # 添加边界矩形
+        boundary_thickness = 5.0 # 边界厚度
+        self.static_obstacles.extend([
+            Rectangle(center=np.array([(self.max_x+self.min_x)/2, self.max_y+boundary_thickness/2]), size=np.array([self.max_x-self.min_x, boundary_thickness]), angle=0.0), # 上
+            Rectangle(center=np.array([(self.max_x+self.min_x)/2, self.min_y-boundary_thickness/2]), size=np.array([self.max_x-self.min_x, boundary_thickness]), angle=0.0), # 下
+            Rectangle(center=np.array([self.min_x-boundary_thickness/2, 0]), size=np.array([boundary_thickness, self.max_y-self.min_y]), angle=0.0), # 左
+            Rectangle(center=np.array([self.max_x+boundary_thickness/2, 0]), size=np.array([boundary_thickness, self.max_y-self.min_y]), angle=0.0), # 右
+        ])
 
     def _get_obs(self):
         meas = []
@@ -155,6 +248,20 @@ class AffineEnv(gym.Env):
 
     def reset(self, seed=MapArg.SEED, options=None):
         super().reset(seed=seed)
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+
+        # --- 根据地图类型生成障碍物 ---
+        if self.map_type == 'random':
+            self._generate_random_obstacles()
+        else:
+            self._generate_static_obstacles()
+
+        # 统一生成边界
+        self._generate_boundaries()
+        self.num_obstacles = len(self.static_obstacles)
+
         self.finish = False
         self.fail = False
         self.collide_count = 0
@@ -227,9 +334,6 @@ class AffineEnv(gym.Env):
             # 遍历智能体i的邻居j
             for j in AgentArg.NEIGHBORS[i]:
                 omega_ij = -AgentArg.STRESS_MATRIX[i, j]
-                # 期望相对位置
-                desired_rel_pos = self.target_pos[i] - self.target_pos[j]
-                # 实际相对位置
                 current_rel_pos = self.agent_pos[i] - self.agent_pos[j]
                 vel_diff = self.agent_vel[i] - self.agent_vel[j]
                 v_j_dot = self.agent_acc[j]
@@ -264,7 +368,6 @@ class AffineEnv(gym.Env):
 
     def reward(self, obs):
         done = False
-        all_lidar = obs["agents_meas"]
 
         total_reward = 0.0
         rew_goal = 0.0
@@ -272,51 +375,64 @@ class AffineEnv(gym.Env):
         rew_move = 0.0
         pen_crash = 0.0
         pen_avoid = 0.0
-
+        pen_stay = 0.0
         # 计算到达目标的奖励
         leader_center = sum(self.agent_pos[:3]) / 3
         # dist_to_goal = obs["dist_to_goal"]
         dist_to_goal = np.linalg.norm(leader_center - self.goal_pos)
         if dist_to_goal < self.goal_radius:
             rew_goal = RewardArg.R_GOAL
+            print(f"\nGoal reached at step {self.step_count}!")
             return rew_goal, True
 
         # 计算移动奖励
-        rew_near = RewardArg.R_NEAR * np.tanh(1/dist_to_goal)
-        # rew_near = rew_near[0]
-        old_dist_to_goal = np.linalg.norm(self.old_pos[0] - self.goal_pos)
+        old_leader_center = sum(self.old_pos[:3]) / 3
+        old_dist_to_goal = np.linalg.norm(old_leader_center - self.goal_pos)
         rew_move = RewardArg.R_MOVE * (old_dist_to_goal - dist_to_goal)
-        # rew_move = rew_move[0]
 
-        # 计算碰撞惩罚
-        for i in range(self.num_agents):
-            num_static_obstacles = len(self.static_obstacles)
-            min_dist_to_obstacles = np.min(all_lidar[i][:num_static_obstacles])
-            min_dist_to_agents = np.min(all_lidar[i][num_static_obstacles:])
-
-            if min_dist_to_obstacles < AgentArg.DANGER_THRESHOLD:
-                if i == 0:
-                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1/ min_dist_to_obstacles - 1 / AgentArg.DANGER_THRESHOLD) ** 2
-                else:
-                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist_to_obstacles - 1 / AgentArg.DANGER_THRESHOLD) ** 2 / (self.num_agents - 1)
-            
-            if min_dist_to_agents < 0.5*AgentArg.DANGER_THRESHOLD:
-                if i == 0:
-                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist_to_agents - 1 / AgentArg.DANGER_THRESHOLD) ** 2
-                else:
-                    pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist_to_agents - 1 / AgentArg.DANGER_THRESHOLD) ** 2 / (self.num_agents - 1)
-            
-            if min_dist_to_obstacles < AgentArg.COLLISION_THRESHOLD or min_dist_to_agents < 0.5*AgentArg.COLLISION_THRESHOLD:
-                pen_crash = RewardArg.P_CRASH
-                done = True
+        pen_stay = RewardArg.P_STAY * np.tanh( 0.005*(dist_to_goal-390) )
+        # rew_near = RewardArg.R_NEAR * np.tanh(1/dist_to_goal)
+        # rew_near = RewardArg.R_NEAR * np.tanh(dist_to_goal)
         
-        total_reward = np.float32(rew_goal + rew_move + rew_near + pen_crash + pen_avoid)
+        # 计算碰撞惩罚
+        min_dist_to_any_obstacle = np.min(obs["agents_meas"])
+        if min_dist_to_any_obstacle < 2*AgentArg.AGENT_RADIUS:
+            pen_crash = RewardArg.P_CRASH
+            self.fail = True # 标记失败类型为碰撞
+            done = True
+            total_reward += pen_crash
+            # self.reward_info = {"total_reward": total_reward, "pen_crash": pen_crash}
+            return total_reward, done
+        
+        for i in range(self.num_agents):
+            min_dist = np.min(obs["agents_meas"][i])
+            if min_dist < AgentArg.DANGER_THRESHOLD:
+                pen_avoid += 0.5 * RewardArg.P_AVOID * (1 / min_dist - 1 / AgentArg.DANGER_THRESHOLD)
+        # for i in range(self.num_agents):
+        #     num_static_obstacles = len(self.static_obstacles)
+
+        #     min_dist_to_obstacles = np.min(obs["agents_meas"][i][:num_static_obstacles])
+        #     min_dist_to_agents = np.min(obs["agents_meas"][i][num_static_obstacles:])
+            
+        #     # # 到静态障碍物的危险程度
+        #     # if min_dist_to_obstacles < AgentArg.DANGER_THRESHOLD:
+        #     #     pen_avoid += 0.5 * RewardArg.P_AVOID_OBST * (1 / min_dist_to_obstacles - 1 / AgentArg.DANGER_THRESHOLD) # ** 2                   
+        #     # if min_dist_to_agents < 0.5*AgentArg.DANGER_THRESHOLD:
+        #     #     pen_avoid += 0.5 * RewardArg.P_AVOID_AGENT * (1 / min_dist_to_agents - 1 / AgentArg.DANGER_THRESHOLD) # ** 2
+        #     pen_avoid = 0.0
+        #     # 碰撞惩罚
+        #     if min_dist_to_obstacles < AgentArg.COLLISION_THRESHOLD or min_dist_to_agents < 0.5*AgentArg.COLLISION_THRESHOLD:
+        #         pen_crash = RewardArg.P_CRASH
+        #         done = True
+        
+        total_reward = np.float32(rew_goal + rew_move + rew_near + pen_crash + pen_avoid + pen_stay)
 
         self.reward_info = {
             "total_reward": total_reward,
             "rew_goal": rew_goal,
             "rew_near": rew_near,
             "rew_move": rew_move,
+            "pen_stay": pen_stay,
             "pen_crash": pen_crash,
             "pen_avoid": pen_avoid,
         }
